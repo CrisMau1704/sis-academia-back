@@ -423,16 +423,62 @@ public function porModalidad($modalidadId, Request $request)
         return $query->get();
     }
 
-    public function horariosDisponibles()
-    {
-        return Horario::with(['disciplina', 'sucursal', 'entrenador'])
-            ->where('estado', 'activo')
-            ->whereRaw('cupo_actual < cupo_maximo')
-            ->orderBy('dia_semana')
-            ->orderBy('hora_inicio')
-            ->get()
-            ->groupBy('dia_semana');
+// HorarioController.php
+public function horariosDisponibles(Request $request)
+{
+    try {
+        $query = Horario::with([
+            'modalidad:id,nombre,precio_mensual,permisos_maximos',
+            'entrenador:id,nombres,apellidos',
+            'sucursal:id,nombre',
+            'disciplina:id,nombre'
+        ]);
+        
+        // Filtro por estado activo
+        $query->where('estado', 'activo');
+        
+        // Filtro por cupo disponible (si se solicita)
+        if ($request->boolean('con_cupo', true)) {
+            $query->whereRaw('cupo_actual < cupo_maximo');
+        }
+        
+        // Filtros opcionales
+        if ($request->filled('modalidad_id')) {
+            $query->where('modalidad_id', $request->modalidad_id);
+        }
+        
+        if ($request->filled('disciplina_id')) {
+            $query->where('disciplina_id', $request->disciplina_id);
+        }
+        
+        if ($request->filled('sucursal_id')) {
+            $query->where('sucursal_id', $request->sucursal_id);
+        }
+        
+        if ($request->filled('entrenador_id')) {
+            $query->where('entrenador_id', $request->entrenador_id);
+        }
+        
+        // Ordenar por día y hora
+        $horarios = $query->orderByRaw("
+            FIELD(dia_semana, 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'),
+            hora_inicio
+        ")->get();
+        
+        return response()->json([
+            'success' => true,
+            'data' => $horarios
+        ]);
+        
+    } catch (\Exception $e) {
+        \Log::error('Error en horariosDisponibles:', ['error' => $e->getMessage()]);
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al obtener horarios disponibles',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 
     public function estadisticas()
     {
@@ -460,6 +506,30 @@ public function porModalidad($modalidadId, Request $request)
                 ->get()
         ]);
     }
+
+    // HorarioController.php
+public function getPorModalidad($modalidadId)
+{
+    try {
+        $horarios = Horario::where('modalidad_id', $modalidadId)
+            ->where('estado', 'activo')
+            ->with(['modalidad', 'entrenador', 'sucursal'])
+            ->get();
+            
+        return response()->json([
+            'success' => true,
+            'data' => $horarios
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al cargar horarios'
+        ], 500);
+    }
+}
+
+
 
     public function incrementarCupo($id)
     {

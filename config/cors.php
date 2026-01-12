@@ -1,22 +1,20 @@
 <?php
 
 return [
-
-    'paths' => ['api/*', 'sanctum/csrf-cookie', 'storage/*'],  // Agregar 'storage/*' para permitir acceder a las imágenes
-
+    'paths' => ['api/*', 'sanctum/csrf-cookie', 'storage/*'],
+    
     'allowed_methods' => ['*'],
-
-    'allowed_origins' => ['http://localhost:5173'],  // El origen de tu frontend en Vue.js
-
+    
+    'allowed_origins' => ['*'],  // Para desarrollo, usar '*'
+    
     'allowed_origins_patterns' => [],
-
+    
     'allowed_headers' => ['*'],
-
+    
     'exposed_headers' => [],
-
+    
     'max_age' => 0,
-
-    'supports_credentials' => true,
-
+    
+    'supports_credentials' => false,  // Si usas '*', debe ser false
 ];
 
