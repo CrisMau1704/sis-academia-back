@@ -23,11 +23,8 @@ RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cac
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 RUN composer install --no-interaction --optimize-autoloader --no-dev
 
-# Cambiar puerto de Apache al que asigna Render
-RUN sed -i "s/80/$PORT/g" /etc/apache2/ports.conf
-RUN sed -i "s/:80/:$PORT/g" /etc/apache2/sites-available/000-default.conf
+# Expone puerto 80
+EXPOSE 80
 
-# Expone el puerto que Render asigna
-EXPOSE $PORT
-
+# Inicia Apache
 CMD ["apache2-foreground"]
