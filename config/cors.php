@@ -5,7 +5,10 @@ return [
     
     'allowed_methods' => ['*'],
     
-    'allowed_origins' => ['*'],  // Para desarrollo, usar '*'
+    'allowed_origins' => [
+        'https://sis-academia-front.vercel.app',
+        'http://localhost:5173', // para desarrollo local
+    ], // Para desarrollo, usar '*'
     
     'allowed_origins_patterns' => [],
     
