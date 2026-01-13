@@ -287,14 +287,9 @@ Route::prefix('asistencias')->group(function () {
     | ROLES Y PERMISOS DEL SISTEMA
     |--------------------------------------------------------------------------
     */
-    Route::prefix('roles')->group(function () {
-        Route::get('/usuarios', [UserRoleController::class, 'index']);
-        Route::get('/lista', [UserRoleController::class, 'getRoles']);
-        Route::post('/asignar', [UserRoleController::class, 'assignRoles']);
-        Route::get('/permisos', [UserRoleController::class, 'getPermissions']);
-        Route::post('/asignar-permisos', [UserRoleController::class, 'assignPermissions']);
-    });
-
+    Route::get('/users-with-roles', [UserRoleController::class, 'index']);
+    Route::get('/roles', [UserRoleController::class, 'getRoles']);
+    Route::post('/assign-roles', [UserRoleController::class, 'assignRoles']);
     /*
     |--------------------------------------------------------------------------
     | DASHBOARD Y REPORTES
