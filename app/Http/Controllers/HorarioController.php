@@ -97,7 +97,7 @@ class HorarioController extends Controller
     {
         $request->validate([
         'nombre' => 'required|string|max:255',
-        'dia_semana' => 'required|in:Lunes,Martes,Miércoles,Jueves,Viernes,Sábado',
+        'dia_semana' => 'required|in:Lunes,Martes,Miércoles,Jueves,Viernes,Sábado,Domingo',
         'hora_inicio' => 'required|date_format:H:i',
         'hora_fin' => 'required|date_format:H:i|after:hora_inicio',
         'disciplina_id' => 'required|exists:disciplinas,id',
@@ -283,7 +283,7 @@ public function porModalidad($modalidadId, Request $request)
         
         $request->validate([
         'nombre' => 'sometimes|required|string|max:255',
-        'dia_semana' => 'sometimes|required|in:Lunes,Martes,Miércoles,Jueves,Viernes,Sábado',
+        'dia_semana' => 'sometimes|required|in:Lunes,Martes,Miércoles,Jueves,Viernes,Sábado,Domingo',
         'hora_inicio' => 'sometimes|required|date_format:H:i',
         'hora_fin' => 'sometimes|required|date_format:H:i|after:hora_inicio',
         'disciplina_id' => 'sometimes|required|exists:disciplinas,id',
@@ -407,7 +407,7 @@ public function porModalidad($modalidadId, Request $request)
     public function horariosPorDia(Request $request)
     {
         $request->validate([
-            'dia_semana' => 'required|in:Lunes,Martes,Miércoles,Jueves,Viernes,Sábado',
+            'dia_semana' => 'required|in:Lunes,Martes,Miércoles,Jueves,Viernes,Sábado,Domingo',
             'sucursal_id' => 'nullable|exists:sucursales,id'
         ]);
         

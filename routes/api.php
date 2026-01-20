@@ -15,6 +15,7 @@ use App\Http\Controllers\UserRoleController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\PermisoController;
 use App\Http\Controllers\RecuperacionController;
+use App\Http\Controllers\ClaseProgramadaController;
 
 /*
 |--------------------------------------------------------------------------
@@ -120,8 +121,7 @@ Route::middleware('auth:sanctum')->group(function () {
         // Nuevas rutas para el sistema de asistencias
         Route::get('/estudiante/{estudianteId}', [HorarioController::class, 'porEstudiante']);
         Route::get('/disponibles-fecha', [HorarioController::class, 'disponiblesPorFecha']);
-        // O en routes/api.php:
-Route::get('/horarios/por-modalidad/{modalidadId}', [HorarioController::class, 'getPorModalidad']);
+        Route::get('/horarios/por-modalidad/{modalidadId}', [HorarioController::class, 'getPorModalidad']);
     });
 
     /*
@@ -146,8 +146,151 @@ Route::get('/horarios/por-modalidad/{modalidadId}', [HorarioController::class, '
         Route::get('/estudiante/{estudianteId}/activas', [InscripcionController::class, 'activasPorEstudiante']);
         Route::get('/{id}/control-clases', [InscripcionController::class, 'controlClases']);
         Route::put('/{id}/actualizar-clases', [InscripcionController::class, 'actualizarContadorClases']);
-        // Ruta corregida - solo una vez
         Route::get('/estudiante/{estudianteId}/activa', [InscripcionController::class, 'inscripcionActiva']);
+        
+        // ========== RUTAS CLAVE PARA ACTUALIZAR ASISTENCIAS ==========
+        
+        // 1. Incrementar asistencia en inscripción (RUTA MÁS IMPORTANTE)
+        Route::post('/{id}/incrementar-asistencia', [InscripcionController::class, 'incrementarAsistencia']);
+
+        Route::get('/{id}/horarios', [InscripcionController::class, 'getHorarios']);
+       Route::put('/{inscripcionId}/horarios/{horarioId}', [InscripcionController::class, 'actualizarHorarioEspecifico']);
+        
+        // 2. Obtener estadísticas de inscripción
+        Route::get('/{id}/estadisticas', [InscripcionController::class, 'estadisticasInscripcion']);
+        
+        // 3. Completar inscripción cuando terminen las clases
+        Route::post('/{id}/completar', [InscripcionController::class, 'completarInscripcion']);
+        
+        // 4. Verificar clases restantes para notificaciones
+        Route::get('/{id}/clases-restantes', [InscripcionController::class, 'clasesRestantes']);
+        
+        // 5. Registrar asistencia (alias)
+        
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | CLASES PROGRAMADAS - NUEVO SISTEMA (CORREGIDO - SIN DUPLICADOS)
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('clases-programadas')->group(function () {
+        // CRUD básico
+        Route::get('/', [ClaseProgramadaController::class, 'index']);
+        Route::post('/', [ClaseProgramadaController::class, 'store']);
+        Route::get('/{clase}', [ClaseProgramadaController::class, 'show']);
+        Route::put('/{clase}', [ClaseProgramadaController::class, 'update']);
+        Route::delete('/{clase}', [ClaseProgramadaController::class, 'destroy']);
+        
+        // Calendario y visualización
+        Route::get('/calendario/mes', [ClaseProgramadaController::class, 'calendario']);
+        
+        // Generación automática
+        Route::post('/generar/automatico', [ClaseProgramadaController::class, 'generar']);
+        
+        // Gestión de estado
+        Route::post('/{clase}/estado', [ClaseProgramadaController::class, 'cambiarEstado']);
+        
+        // ========== RUTAS PARA MARCAR ASISTENCIA ==========
+        Route::post('/{clase}/marcar-asistencia', [ClaseProgramadaController::class, 'marcarAsistencia']);
+        Route::get('/buscar', [ClaseProgramadaController::class, 'buscarClase']);
+        
+        // Recuperaciones
+        Route::post('/recuperacion/nueva', [ClaseProgramadaController::class, 'crearRecuperacion']);
+        Route::get('/estudiante/{estudianteId}/pendientes-recuperacion', 
+            [ClaseProgramadaController::class, 'clasesParaRecuperacion']);
+        
+        // Reportes
+        Route::get('/reporte/asistencias', [ClaseProgramadaController::class, 'reporteAsistencias']);
+        
+        // Filtros específicos
+        Route::get('/fecha/{fecha}', [ClaseProgramadaController::class, 'porFecha']);
+        
+        // Para dashboard rápido
+        Route::get('/estadisticas/hoy', [ClaseProgramadaController::class, 'estadisticasHoy']);
+    });
+
+    // Ruta para generar clases al crear inscripción
+    Route::post('/inscripciones/{id}/generar-clases-programadas', function ($id) {
+        try {
+            $inscripcion = \App\Models\Inscripcion::with(['horarios', 'estudiante'])->findOrFail($id);
+            
+            // Verificar si ya tiene clases generadas
+            $clasesExistentes = \App\Models\ClaseProgramada::where('inscripcion_id', $id)->count();
+            
+            if ($clasesExistentes > 0) {
+                return response()->json([
+                    'success' => true,
+                    'message' => "La inscripción ya tiene {$clasesExistentes} clases generadas",
+                    'total_clases' => $clasesExistentes,
+                    'inscripcion_id' => $id
+                ]);
+            }
+            
+            $totalGeneradas = 0;
+            
+            // Generar clases manualmente
+            $fechaInicio = \Carbon\Carbon::parse($inscripcion->fecha_inicio);
+            $fechaFin = \Carbon\Carbon::parse($inscripcion->fecha_fin);
+            
+            $diasMap = [
+                'lunes' => 1, 'martes' => 2, 'miércoles' => 3, 'miercoles' => 3,
+                'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'sabado' => 6,
+                'domingo' => 0
+            ];
+            
+            foreach ($inscripcion->horarios as $horario) {
+                $diaHorario = strtolower($horario->dia_semana);
+                $diaNumero = $diasMap[$diaHorario] ?? 1;
+                
+                $fechaActual = $fechaInicio->copy();
+                while ($fechaActual <= $fechaFin) {
+                    if ($fechaActual->dayOfWeek == $diaNumero) {
+                        // Verificar si ya existe esta clase para evitar duplicados
+                        $existe = \App\Models\ClaseProgramada::where('inscripcion_id', $inscripcion->id)
+                            ->where('horario_id', $horario->id)
+                            ->whereDate('fecha', $fechaActual)
+                            ->exists();
+                        
+                        if (!$existe) {
+                            \App\Models\ClaseProgramada::create([
+                                'inscripcion_id' => $inscripcion->id,
+                                'horario_id' => $horario->id,
+                                'estudiante_id' => $inscripcion->estudiante_id,
+                                'fecha' => $fechaActual->format('Y-m-d'),
+                                'hora_inicio' => $horario->hora_inicio,
+                                'hora_fin' => $horario->hora_fin,
+                                'estado_clase' => 'programada',
+                                'cuenta_para_asistencia' => true,
+                                'es_recuperacion' => false,
+                                'observaciones' => 'Generada automáticamente al crear la inscripción'
+                            ]);
+                            
+                            $totalGeneradas++;
+                        }
+                    }
+                    $fechaActual->addDay();
+                }
+            }
+            
+            \Log::info("Se generaron {$totalGeneradas} clases para inscripción #{$inscripcion->id}");
+            
+            return response()->json([
+                'success' => true,
+                'message' => "Se generaron {$totalGeneradas} clases programadas para la inscripción",
+                'total_clases' => $totalGeneradas,
+                'inscripcion_id' => $id
+            ]);
+            
+        } catch (\Exception $e) {
+            \Log::error('Error generando clases: ' . $e->getMessage());
+            
+            return response()->json([
+                'success' => false,
+                'message' => 'Error generando clases: ' . $e->getMessage(),
+                'error' => $e->getMessage()
+            ], 500);
+        }
     });
 
     /*
@@ -155,34 +298,23 @@ Route::get('/horarios/por-modalidad/{modalidadId}', [HorarioController::class, '
     | ASISTENCIAS - SISTEMA COMPLETO
     |--------------------------------------------------------------------------
     */
-/*
-|--------------------------------------------------------------------------
-| ASISTENCIAS - SISTEMA COMPLETO
-|--------------------------------------------------------------------------
-*/
-Route::prefix('asistencias')->group(function () {
-    // RUTAS ESPECÍFICAS PRIMERO (estas se evaluarán primero)
-    Route::get('/dia', [AsistenciaController::class, 'obtenerDia']);
+    Route::prefix('asistencias')->group(function () {
+    // Ruta principal para marcar asistencia
     Route::post('/marcar', [AsistenciaController::class, 'marcar']);
+
+    // Alias si quieres compatibilidad
+    Route::post('/registrar', [AsistenciaController::class, 'marcar']);
+
+    // Otras rutas de asistencias
     Route::post('/justificar', [AsistenciaController::class, 'justificar']);
     Route::post('/lote', [AsistenciaController::class, 'marcarLote']);
     Route::get('/estadisticas', [AsistenciaController::class, 'estadisticas']);
     Route::get('/exportar', [AsistenciaController::class, 'exportar']);
     Route::get('/permisos/{inscripcionId}', [AsistenciaController::class, 'verificarPermisos']);
     Route::get('/motivos', [AsistenciaController::class, 'motivosJustificacion']);
-    
-    // ALIAS para compatibilidad
-    Route::get('/por-fecha', [AsistenciaController::class, 'obtenerDia']);
-    Route::post('/registrar', [AsistenciaController::class, 'marcar']);
-    
-    // RUTAS CRUD SOLO SI LAS NECESITAS - PONLAS AL FINAL
-    // Route::get('/{id}', [AsistenciaController::class, 'show'])->where('id', '[0-9]+');
-    // Route::put('/{id}', [AsistenciaController::class, 'update']);
-    // Route::delete('/{id}', [AsistenciaController::class, 'destroy']);
+    Route::get('/dia', [AsistenciaController::class, 'obtenerDia']);
 });
 
-// Si tienes esto, ELIMÍNALO o ponlo DESPUÉS:
-// Route::apiResource('asistencias', AsistenciaController::class);
 
     /*
     |--------------------------------------------------------------------------
@@ -190,7 +322,6 @@ Route::prefix('asistencias')->group(function () {
     |--------------------------------------------------------------------------
     */
     Route::prefix('permisos')->group(function () {
-        // CRUD básico
         Route::get('/', [PermisoController::class, 'index']);
         Route::post('/', [PermisoController::class, 'store']);
         Route::get('/{id}', [PermisoController::class, 'show']);
@@ -284,12 +415,78 @@ Route::prefix('asistencias')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
+    | NOTIFICACIONES
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('notificaciones')->group(function () {
+        // Enviar notificación por clases bajas
+        Route::post('/clases-bajas', function (\Illuminate\Http\Request $request) {
+            try {
+                $data = $request->validate([
+                    'estudiante_id' => 'required|integer',
+                    'estudiante_email' => 'required|email',
+                    'estudiante_nombre' => 'required|string',
+                    'inscripcion_id' => 'required|integer',
+                    'clases_restantes' => 'required|integer',
+                    'clases_totales' => 'required|integer',
+                    'clases_asistidas' => 'required|integer',
+                    'modalidad' => 'nullable|string',
+                    'sucursal' => 'nullable|string'
+                ]);
+                
+                // Aquí implementarías el envío de correo
+                \Log::info('Notificación de clases bajas enviada', $data);
+                
+                // Guardar en la base de datos
+                \App\Models\Notificacion::create([
+                    'estudiante_id' => $data['estudiante_id'],
+                    'inscripcion_id' => $data['inscripcion_id'],
+                    'tipo' => 'clases_bajas',
+                    'mensaje' => "Te quedan {$data['clases_restantes']} clases en tu inscripción",
+                    'fecha' => now(),
+                    'enviada' => true
+                ]);
+                
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Notificación registrada exitosamente',
+                    'data' => $data
+                ]);
+                
+            } catch (\Exception $e) {
+                \Log::error('Error enviando notificación: ' . $e->getMessage());
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Error enviando notificación',
+                    'error' => $e->getMessage()
+                ], 500);
+            }
+        });
+        
+        // Obtener notificaciones del día
+        Route::get('/hoy', function () {
+            $hoy = now()->toDateString();
+            $notificaciones = \App\Models\Notificacion::whereDate('fecha', $hoy)
+                ->with(['estudiante'])
+                ->get();
+            
+            return response()->json([
+                'success' => true,
+                'total' => $notificaciones->count(),
+                'notificaciones' => $notificaciones
+            ]);
+        });
+    });
+
+    /*
+    |--------------------------------------------------------------------------
     | ROLES Y PERMISOS DEL SISTEMA
     |--------------------------------------------------------------------------
     */
     Route::get('/users-with-roles', [UserRoleController::class, 'index']);
     Route::get('/roles', [UserRoleController::class, 'getRoles']);
     Route::post('/assign-roles', [UserRoleController::class, 'assignRoles']);
+
     /*
     |--------------------------------------------------------------------------
     | DASHBOARD Y REPORTES

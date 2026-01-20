@@ -93,57 +93,98 @@ public function show($id)
     /**
      * 2. Marcar asistencia (UN SOLO CLICK)
      */
-   public function marcar(Request $request)
+
+public function marcar(Request $request)
 {
     try {
         $request->validate([
             'inscripcion_id' => 'required|exists:inscripciones,id',
-            'horario_id' => 'required|exists:horarios,id',
-            'fecha' => 'required|date',
-            'estado' => 'required|in:asistio,falto,permiso'  // Puede incluir 'permiso' pero sin crear permiso automático
+            'horario_id'     => 'required|exists:horarios,id',
+            'fecha'          => 'required|date',
+            'estado'         => 'required|in:asistio,falto,permiso'
         ]);
-        
-        Log::info("✅ Marcando asistencia: Insc={$request->inscripcion_id}, Hor={$request->horario_id}, Estado={$request->estado}");
-        
-        // Buscar o crear asistencia
+
+        Log::info("✅ Marcando asistencia", $request->all());
+
+        // 1. Buscar clase programada
+        $claseProgramada = DB::table('clases_programadas')
+            ->where('inscripcion_id', $request->inscripcion_id)
+            ->where('horario_id', $request->horario_id)
+            ->where('fecha', $request->fecha)
+            ->first();
+
+        // 2. Mapear estado
+        $estadoClaseMap = [
+            'asistio' => 'realizada',
+            'falto'   => 'ausente',
+            'permiso' => 'justificada'
+        ];
+        $estadoClase = $estadoClaseMap[$request->estado];
+
+        // 3. Crear o actualizar asistencia
         $asistencia = Asistencia::updateOrCreate(
             [
                 'inscripcion_id' => $request->inscripcion_id,
-                'horario_id' => $request->horario_id,
-                'fecha' => $request->fecha
+                'horario_id'     => $request->horario_id,
+                'fecha'          => $request->fecha
             ],
             [
-                'estado' => $request->estado,
-                'observacion' => $request->observacion ?? 'Marcado rápido'  // ← SIMPLIFICADO
-                // Ya no hay distinción especial para 'permiso'
+                'estado'       => $request->estado,
+                'observacion'  => $request->observacion ?? 'Marcado rápido'
             ]
         );
-        
-        // ACTUALIZACIÓN: Ya NO llamar a registrarPermisoAutomatico
-        // El permiso se crea SOLO con el método justificar()
-        
-        // Actualizar contadores en inscripcion_horario
-        $this->actualizarContadorHorario($request->inscripcion_id, $request->horario_id);
-        
-        // Obtener datos actualizados para respuesta
-        $estudiante = $this->obtenerDatosEstudiante($request->inscripcion_id, $request->horario_id, $request->fecha);
-        
+
+        // 4. Actualizar clase programada
+        if ($claseProgramada) {
+            DB::table('clases_programadas')
+                ->where('id', $claseProgramada->id)
+                ->update([
+                    'estado_clase'  => $estadoClase,
+                    'asistencia_id'=> $asistencia->id,
+                    'updated_at'   => now()
+                ]);
+        }
+
+        // 5. Actualizar inscripcion_horarios
+        $this->actualizarContadorHorario(
+            $request->inscripcion_id,
+            $request->horario_id
+        );
+
+        // 6. Actualizar INSCRIPCIONES (clases_asistidas)
+        $totalAsistidas = Asistencia::where('inscripcion_id', $request->inscripcion_id)
+            ->where('estado', 'asistio')
+            ->count();
+
+        Inscripcion::where('id', $request->inscripcion_id)->update([
+            'clases_asistidas' => $totalAsistidas
+        ]);
+
+        // 7. Obtener datos actualizados para frontend
+        $estudiante = $this->obtenerDatosEstudiante(
+            $request->inscripcion_id,
+            $request->horario_id,
+            $request->fecha
+        );
+
         return response()->json([
-            'success' => true,
-            'message' => $this->getMensajeEstado($request->estado),
+            'success'    => true,
+            'message'    => $this->getMensajeEstado($request->estado),
             'asistencia' => $asistencia,
             'estudiante' => $estudiante
         ]);
-        
+
     } catch (\Exception $e) {
         Log::error("❌ Error marcar: " . $e->getMessage());
+
         return response()->json([
             'success' => false,
-            'message' => 'Error al marcar asistencia: ' . $e->getMessage()  // ← Mostrar mensaje real
+            'message' => 'Error al marcar asistencia'
         ], 500);
     }
 }
-    
+
+
     /**
      * 3. Justificar falta (MOTIVOS PREDEFINIDOS)
      */
@@ -157,7 +198,6 @@ public function justificar(Request $request)
         \Log::info('=== JUSTIFICAR LLAMADO ===');
         \Log::info('Datos recibidos:', $request->all());
         
-        // Validación
         $request->validate([
             'inscripcion_id' => 'required|exists:inscripciones,id',
             'horario_id' => 'required|exists:horarios,id',
@@ -165,10 +205,16 @@ public function justificar(Request $request)
             'motivo' => 'required|string|max:500'
         ]);
         
-        // Obtener usuario autenticado
         $usuarioId = auth()->check() ? auth()->id() : 1;
         
-        // Usar el método del modelo Asistencia
+        // ========== 1. BUSCAR CLASE PROGRAMADA ==========
+        $claseProgramada = DB::table('clases_programadas')
+            ->where('inscripcion_id', $request->inscripcion_id)
+            ->where('horario_id', $request->horario_id)
+            ->where('fecha', $request->fecha)
+            ->first();
+        
+        // ========== 2. USAR EL MÉTODO DEL MODELO ==========
         $resultado = Asistencia::justificarFalta(
             $request->inscripcion_id,
             $request->horario_id,
@@ -182,29 +228,41 @@ public function justificar(Request $request)
             throw new \Exception($resultado['error']);
         }
         
+        // ========== 3. ¡¡¡ACTUALIZAR CLASE PROGRAMADA!!! ==========
+        if ($claseProgramada) {
+            DB::table('clases_programadas')
+                ->where('id', $claseProgramada->id)
+                ->update([
+                    'estado_clase' => 'justificada',
+                    'asistencia_id' => $resultado['asistencia']->id,
+                    'updated_at' => now()
+                ]);
+            
+            \Log::info('✅ Clase programada actualizada a "justificada"');
+        }
+        
         \Log::info('✅ Permiso justificado exitosamente:', [
             'asistencia_id' => $resultado['asistencia']->id,
             'permiso_id' => $resultado['permiso']->id,
             'permisos_restantes' => $resultado['permisos_restantes']
         ]);
         
-        // AsistenciaController.php - método justificar()
-return response()->json([
-    'success' => true,
-    'message' => 'Falta justificada correctamente',
-    'data' => [ // ← ESTE "data" ES LO QUE BUSCA EL FRONTEND
-        'asistencia' => [
-            'id' => $resultado['asistencia']->id,
-            'inscripcion_id' => $resultado['asistencia']->inscripcion_id,
-            'estado' => $resultado['asistencia']->estado
-        ],
-        'permiso' => [
-            'id' => $resultado['permiso']->id,
-            'motivo' => $resultado['permiso']->motivo
-        ],
-        'permisos_restantes' => $resultado['permisos_restantes']
-    ]
-]);
+        return response()->json([
+            'success' => true,
+            'message' => 'Falta justificada correctamente',
+            'data' => [
+                'asistencia' => [
+                    'id' => $resultado['asistencia']->id,
+                    'inscripcion_id' => $resultado['asistencia']->inscripcion_id,
+                    'estado' => $resultado['asistencia']->estado
+                ],
+                'permiso' => [
+                    'id' => $resultado['permiso']->id,
+                    'motivo' => $resultado['permiso']->motivo
+                ],
+                'permisos_restantes' => $resultado['permisos_restantes']
+            ]
+        ]);
         
     } catch (\Exception $e) {
         \Log::error('❌ Error en controlador justificar:', [
