@@ -299,6 +299,8 @@ Route::middleware('auth:sanctum')->group(function () {
     |--------------------------------------------------------------------------
     */
     Route::prefix('asistencias')->group(function () {
+
+    Route::get('/', [AsistenciaController::class, 'index']);
     // Ruta principal para marcar asistencia
     Route::post('/marcar', [AsistenciaController::class, 'marcar']);
 

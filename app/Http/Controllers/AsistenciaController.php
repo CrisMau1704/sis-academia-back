@@ -15,6 +15,137 @@ use Illuminate\Support\Facades\Log;
 
 class AsistenciaController extends Controller
 {
+
+// Agrega esta función al inicio del controlador, después de los 'use'
+public function index(Request $request)
+{
+    try {
+        Log::info("📊 Asistencias index - Filtros recibidos:", $request->all());
+        
+        // ==================== CONSTRUIR CONSULTA ====================
+        $query = Asistencia::query();
+        
+        // 1. Filtrar por rango de fechas (fecha_desde)
+        if ($request->has('fecha_desde')) {
+            $fechaDesde = $request->input('fecha_desde');
+            $query->whereDate('fecha', '>=', $fechaDesde);
+        }
+        
+        if ($request->has('fecha_hasta')) {
+            $fechaHasta = $request->input('fecha_hasta');
+            $query->whereDate('fecha', '<=', $fechaHasta);
+        }
+        
+        // Filtrar por mes específico (si viene mes y año)
+        if ($request->has('mes') && $request->has('anio')) {
+            $query->whereMonth('fecha', $request->mes)
+                  ->whereYear('fecha', $request->anio);
+        }
+        
+        // 2. Filtrar por modalidad
+        if ($request->has('modalidad_id') && $request->modalidad_id) {
+            // Si las asistencias tienen relación directa con modalidad
+            // Si no, necesitarías unir con horarios
+            $query->whereHas('horario', function ($q) use ($request) {
+                $q->where('modalidad_id', $request->modalidad_id);
+            });
+        }
+        
+        // 3. Filtrar por sucursal
+        if ($request->has('sucursal_id') && $request->sucursal_id) {
+            $query->whereHas('horario', function ($q) use ($request) {
+                $q->where('sucursal_id', $request->sucursal_id);
+            });
+        }
+        
+        // 4. Filtrar por estado
+        if ($request->has('estado') && $request->estado) {
+            $query->where('estado', $request->estado);
+        }
+        
+        // 5. Incluir relaciones (include)
+        $includes = explode(',', $request->input('include', ''));
+        $withRelations = [];
+        
+        if (in_array('estudiante', $includes)) {
+            $withRelations[] = 'inscripcion.estudiante';
+        }
+        if (in_array('modalidad', $includes)) {
+            $withRelations[] = 'horario.modalidad';
+        }
+        if (in_array('sucursal', $includes)) {
+            $withRelations[] = 'horario.sucursal';
+        }
+        if (in_array('horario', $includes)) {
+            $withRelations[] = 'horario';
+        }
+        
+        if (!empty($withRelations)) {
+            $query->with($withRelations);
+        }
+        
+        // 6. Paginación
+        $perPage = $request->input('per_page', 100);
+        $page = $request->input('page', 1);
+        
+        // ==================== EJECUTAR CONSULTA ====================
+        $asistencias = $query->orderBy('fecha', 'desc')
+                            ->orderBy('id', 'desc')
+                            ->paginate($perPage, ['*'], 'page', $page);
+        
+        // ==================== FORMATEAR RESPUESTA ====================
+        $formattedAsistencias = $asistencias->map(function ($asistencia) {
+            return [
+                'id' => $asistencia->id,
+                'estudiante_id' => $asistencia->inscripcion->estudiante->id ?? null,
+                'estudiante_nombre' => isset($asistencia->inscripcion->estudiante) 
+                    ? $asistencia->inscripcion->estudiante->nombres . ' ' . $asistencia->inscripcion->estudiante->apellidos
+                    : 'Sin estudiante',
+                'modalidad_id' => $asistencia->horario->modalidad->id ?? null,
+                'modalidad_nombre' => $asistencia->horario->modalidad->nombre ?? 'Sin modalidad',
+                'sucursal_id' => $asistencia->horario->sucursal->id ?? null,
+                'sucursal_nombre' => $asistencia->horario->sucursal->nombre ?? 'Sin sucursal',
+                'horario_id' => $asistencia->horario_id,
+                'horario_nombre' => $asistencia->horario->nombre ?? 'Sin horario',
+                'fecha' => $asistencia->fecha,
+                'estado' => $asistencia->estado,
+                'hora_entrada' => $asistencia->hora_entrada,
+                'hora_salida' => $asistencia->hora_salida,
+                'observacion' => $asistencia->observacion,
+                'created_at' => $asistencia->created_at,
+                'updated_at' => $asistencia->updated_at
+            ];
+        });
+        
+        Log::info("✅ Asistencias index - Encontradas: " . $asistencias->total());
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Asistencias obtenidas correctamente',
+            'data' => $formattedAsistencias,
+            'pagination' => [
+                'total' => $asistencias->total(),
+                'per_page' => $asistencias->perPage(),
+                'current_page' => $asistencias->currentPage(),
+                'last_page' => $asistencias->lastPage(),
+                'from' => $asistencias->firstItem(),
+                'to' => $asistencias->lastItem()
+            ],
+            'filters' => $request->all()
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error("❌ Error en AsistenciaController@index: " . $e->getMessage() . "\n" . $e->getTraceAsString());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al obtener las asistencias: ' . $e->getMessage(),
+            'error' => $e->getMessage()
+        ], 500);
+    }
+}
+
+
     // Agrega esto al final del controlador, antes del cierre }
 public function show($id)
 {

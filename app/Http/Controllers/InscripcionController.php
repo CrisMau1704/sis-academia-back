@@ -915,61 +915,221 @@ public function show($id)
         }
     }
 
-    public function renovar($id, Request $request)
-    {
-        try {
-            $inscripcion = Inscripcion::findOrFail($id);
-            
-            $request->validate([
-                'fecha_inicio' => 'sometimes|date',
-                'fecha_fin' => 'sometimes|date|after:fecha_inicio',
-                'motivo' => 'nullable|string'
-            ]);
-            
-            // Actualizar fechas
-            $fechaInicio = $request->has('fecha_inicio') 
-                ? Carbon::parse($request->fecha_inicio)
-                : now();
-                
-            $fechaFin = $request->has('fecha_fin')
-                ? Carbon::parse($request->fecha_fin)
-                : $fechaInicio->copy()->addMonth();
-            
-            // Actualizar inscripción principal
-            $inscripcion->update([
-                'fecha_inicio' => $fechaInicio,
-                'fecha_fin' => $fechaFin,
-                'clases_asistidas' => 0, // ← Reiniciar contadores
-                'permisos_usados' => 0,
-                'estado' => 'activo'
-            ]);
-            
-            // Actualizar también los inscripcion_horarios
-            $inscripcion->inscripcionHorarios()->update([
-                'fecha_inicio' => $fechaInicio,
-                'fecha_fin' => $fechaFin,
-                'clases_asistidas' => 0,
-                'clases_restantes' => DB::raw('clases_totales'), // ← Reiniciar clases restantes
-                'permisos_usados' => 0,
-                'estado' => 'activo'
-            ]);
-            
-            // Cargar relaciones
-            $inscripcion->load(['estudiante', 'modalidad']);
-            
-            return response()->json([
-                'success' => true,
-                'message' => 'Inscripción renovada exitosamente',
-                'data' => $inscripcion
-            ]);
-            
-        } catch (\Exception $e) {
+  public function renovar($id, Request $request)
+{
+    DB::beginTransaction();
+    
+    try {
+        // 1. Obtener inscripción actual con todas las relaciones
+        $inscripcionActual = Inscripcion::with([
+            'estudiante',
+            'modalidad',
+            'inscripcionHorarios.horario',
+            'horarios'
+        ])->findOrFail($id);
+        
+        // 2. Validar que la inscripción esté activa
+        if ($inscripcionActual->estado !== 'activo') {
             return response()->json([
                 'success' => false,
-                'message' => 'Error al renovar inscripción: ' . $e->getMessage()
-            ], 500);
+                'message' => 'Solo se pueden renovar inscripciones activas'
+            ], 400);
         }
+        
+        // 3. Validar datos de entrada
+        $request->validate([
+            'fecha_inicio' => 'required|date',
+            'fecha_fin' => 'required|date|after:fecha_inicio',
+            'motivo' => 'nullable|string|max:500',
+            'metodo_pago' => 'nullable|in:efectivo,tarjeta,transferencia,qr',
+            'monto_pago' => 'nullable|numeric|min:0'
+        ]);
+        
+        // 4. Calcular fechas
+        $fechaInicio = Carbon::parse($request->fecha_inicio);
+        $fechaFin = Carbon::parse($request->fecha_fin);
+        
+        // 5. Crear NUEVA inscripción (NUEVO registro en la tabla)
+        $nuevaInscripcion = Inscripcion::create([
+            'estudiante_id' => $inscripcionActual->estudiante_id,
+            'modalidad_id' => $inscripcionActual->modalidad_id,
+            'fecha_inicio' => $fechaInicio,
+            'fecha_fin' => $fechaFin,
+            
+            // Clases se calcularán después
+            'clases_totales' => 0,
+            'clases_asistidas' => 0,
+            'clases_restantes' => 0,
+            
+            'permisos_usados' => 0,
+            'permisos_disponibles' => $inscripcionActual->modalidad->permisos_maximos ?? 3,
+            'monto_mensual' => $inscripcionActual->monto_mensual ?? $inscripcionActual->modalidad->precio_mensual,
+            'estado' => 'activo',
+            'observaciones' => 'Renovación de inscripción #' . $inscripcionActual->id . 
+                             ($request->motivo ? '. Motivo: ' . $request->motivo : ''),
+            
+            // Mantener misma sucursal y entrenador
+            'sucursal_id' => $inscripcionActual->sucursal_id,
+            'entrenador_id' => $inscripcionActual->entrenador_id,
+            
+            'created_at' => now(),
+            'updated_at' => now()
+        ]);
+        
+        Log::info("✅ NUEVA inscripción creada #{$nuevaInscripcion->id} como renovación de #{$id}");
+        
+        // 6. Copiar horarios de la inscripción anterior
+        $totalClasesGeneradas = 0;
+        
+        foreach ($inscripcionActual->inscripcionHorarios as $inscripcionHorario) {
+            // Calcular cuántas clases corresponden para este período
+            $clasesParaEsteHorario = $this->calcularClasesParaHorarioRenovacion(
+                $fechaInicio,
+                $fechaFin,
+                $inscripcionHorario->horario
+            );
+            
+            // Verificar que tenga al menos 1 clase
+            if ($clasesParaEsteHorario < 1) {
+                throw new \Exception("El horario {$inscripcionHorario->horario->nombre} no tiene clases en el período seleccionado. Por favor, extienda la fecha de fin.");
+            }
+            
+            // Crear NUEVO inscripcion_horario para la NUEVA inscripción
+            $nuevoInscripcionHorario = InscripcionHorario::create([
+                'inscripcion_id' => $nuevaInscripcion->id,
+                'horario_id' => $inscripcionHorario->horario_id,
+                'clases_totales' => $clasesParaEsteHorario,
+                'clases_asistidas' => 0,
+                'clases_restantes' => $clasesParaEsteHorario,
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin,
+                'permisos_usados' => 0,
+                'estado' => 'activo',
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
+            
+            Log::info("📅 Horario copiado: {$inscripcionHorario->horario->nombre} - {$clasesParaEsteHorario} clases");
+            
+            // 7. GENERAR NUEVAS CLASES PROGRAMADAS para la NUEVA inscripción
+            $clasesGeneradasParaEsteHorario = $this->generarClasesParaHorario(
+                $nuevaInscripcion->id,
+                $nuevoInscripcionHorario->id,
+                $inscripcionHorario->horario,
+                $inscripcionActual->estudiante_id,
+                $fechaInicio->format('Y-m-d'),
+                $fechaFin->format('Y-m-d'),
+                $clasesParaEsteHorario
+            );
+            
+            $totalClasesGeneradas += $clasesGeneradasParaEsteHorario;
+            
+            // 8. Incrementar cupo del horario (porque es un nuevo estudiante en el horario)
+            DB::table('horarios')
+                ->where('id', $inscripcionHorario->horario_id)
+                ->increment('cupo_actual');
+        }
+        
+        // 9. Actualizar totales de la nueva inscripción
+        $nuevaInscripcion->update([
+            'clases_totales' => $totalClasesGeneradas,
+            'clases_restantes' => $totalClasesGeneradas
+        ]);
+        
+        // 10. Registrar NUEVO PAGO
+        $montoPago = $request->monto_pago ?? 
+                    ($inscripcionActual->monto_mensual ?? $inscripcionActual->modalidad->precio_mensual);
+        
+        $pago = \App\Models\Pago::create([
+            'inscripcion_id' => $nuevaInscripcion->id,
+            'estudiante_id' => $inscripcionActual->estudiante_id,
+            'monto' => $montoPago,
+            'metodo_pago' => $request->metodo_pago ?? 'efectivo',
+            'fecha_pago' => now(),
+            'estado' => 'pagado',
+            'observacion' => 'Pago por renovación de inscripción #' . $inscripcionActual->id . 
+                           ' a nueva inscripción #' . $nuevaInscripcion->id . 
+                           '. Período: ' . $fechaInicio->format('d/m/Y') . ' - ' . $fechaFin->format('d/m/Y'),
+            'created_at' => now(),
+            'updated_at' => now()
+        ]);
+        
+        Log::info("💰 Nuevo pago registrado #{$pago->id} por {$montoPago}");
+        
+        // 11. Actualizar inscripción anterior (marcar como renovada)
+        $inscripcionActual->update([
+            'estado' => 'renovado',
+            'fecha_fin' => $fechaInicio->copy()->subDay(), // Termina un día antes de la nueva
+            'observaciones' => 'Renovada el ' . now()->format('d/m/Y') . 
+                             '. Nueva inscripción: #' . $nuevaInscripcion->id
+        ]);
+        
+        // 12. Cargar relaciones para la respuesta
+        $nuevaInscripcion->load(['estudiante', 'modalidad', 'inscripcionHorarios.horario']);
+        
+        DB::commit();
+        
+        Log::info("🎉 Renovación COMPLETADA: Antigua #{$id} → Nueva #{$nuevaInscripcion->id}");
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Inscripción renovada exitosamente con nueva inscripción',
+            'data' => [
+                'inscripcion_anterior_id' => $inscripcionActual->id,
+                'nueva_inscripcion_id' => $nuevaInscripcion->id,
+                'nueva_inscripcion' => $nuevaInscripcion,
+                'pago_id' => $pago->id,
+                'clases_generadas' => $totalClasesGeneradas,
+                'monto_pagado' => $montoPago,
+                'metodo_pago' => $pago->metodo_pago,
+                'nuevo_periodo' => $fechaInicio->format('Y-m-d') . ' al ' . $fechaFin->format('Y-m-d')
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        DB::rollBack();
+        
+        Log::error('❌ Error al renovar inscripción: ' . $e->getMessage());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al renovar inscripción: ' . $e->getMessage(),
+            'error_details' => env('APP_DEBUG') ? [
+                'message' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+                'trace' => $e->getTraceAsString()
+            ] : null
+        ], 500);
     }
+}
+
+// Agrega esta función auxiliar para calcular clases por horario
+private function calcularClasesParaHorarioRenovacion($fechaInicio, $fechaFin, $horario)
+{
+    $diasSemana = [
+        'lunes' => 1, 'martes' => 2, 'miércoles' => 3,
+        'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'sabado' => 6,
+        'domingo' => 0
+    ];
+    
+    $diaHorario = strtolower($horario->dia_semana);
+    $diaNumero = $diasSemana[$diaHorario] ?? 1;
+    
+    $contador = 0;
+    $fechaActual = $fechaInicio->copy();
+    
+    while ($fechaActual <= $fechaFin) {
+        if ($fechaActual->dayOfWeek == $diaNumero) {
+            $contador++;
+        }
+        $fechaActual->addDay();
+    }
+    
+    Log::info("📅 Calculando clases para {$horario->nombre} ({$horario->dia_semana}): {$contador} clases en período {$fechaInicio->format('Y-m-d')} al {$fechaFin->format('Y-m-d')}");
+    
+    return $contador;
+}
 
     // ========== MÉTODOS PRIVADOS CORREGIDOS ==========
 
