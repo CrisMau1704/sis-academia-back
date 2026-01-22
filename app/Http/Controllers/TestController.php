@@ -26,7 +26,7 @@ class TestController extends Controller  // ¡ESTO FALTABA!
                 'id' => 1,  // ¡AGREGA ESTO!
                 'nombres' => 'Usuario',
                 'apellidos' => 'Prueba',
-                'correo' => 'TU_CORREO_REAL@gmail.com', // ← CAMBIA POR TU CORREO
+                'correo' => 'typ.infoactiva@gmail.com', // ← CAMBIA POR TU CORREO
                 'ci' => '0000000'
             ];
 
