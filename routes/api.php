@@ -16,6 +16,7 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\PermisoController;
 use App\Http\Controllers\RecuperacionController;
 use App\Http\Controllers\ClaseProgramadaController;
+use App\Http\Controllers\TestController;
 
 /*
 |--------------------------------------------------------------------------
@@ -38,6 +39,9 @@ Route::prefix('v1/auth')->group(function () {
 |--------------------------------------------------------------------------
 */
 Route::middleware('auth:sanctum')->group(function () {
+
+// routes/api.php (dentro del grupo 'auth:sanctum' si quieres protegerlo)
+Route::post('/test-email', [TestController::class, 'sendTestEmail']);
 
     /*
     |--------------------------------------------------------------------------
@@ -511,6 +515,55 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/notificaciones-vencimientos', [InscripcionController::class, 'notificacionesVencimientos']);
         Route::get('/alertas-pagos', [PagoController::class, 'alertasPagos']);
     });
+
+    /*
+|--------------------------------------------------------------------------
+| PERMISOS DEL SISTEMA
+|--------------------------------------------------------------------------
+*/
+Route::prefix('permisos-sistema')->group(function () {
+    // Obtener permisos del menú para el usuario actual
+    Route::get('/menu', [UserRoleController::class, 'getMenuPermissions']);
+    
+    // Obtener todos los permisos disponibles
+    Route::get('/', [UserRoleController::class, 'getAllPermissions']);
+    
+    // Obtener permisos por rol
+    Route::get('/rol/{id}', [UserRoleController::class, 'getPermissionsByRole']);
+    
+    // Actualizar permisos de un rol
+    Route::put('/rol/{id}', [UserRoleController::class, 'updateRolePermissions']);
+});
+
+/*
+|--------------------------------------------------------------------------
+| ROLES CON PERMISOS
+|--------------------------------------------------------------------------
+*/
+Route::prefix('roles')->group(function () {
+    // Obtener usuarios con roles
+    Route::get('/usuarios', [UserRoleController::class, 'index']);
+    
+    // Obtener todos los roles
+    Route::get('/', [UserRoleController::class, 'getRoles']);
+    
+    // Asignar roles a un usuario
+    Route::post('/asignar', [UserRoleController::class, 'assignRoles']);
+    
+    // Obtener permisos por rol
+    Route::get('/{id}/permisos', [UserRoleController::class, 'getPermissionsByRole']);
+    
+    // Obtener roles con sus permisos
+    Route::get('/con-permisos', [UserRoleController::class, 'getRolesWithPermissions']);
+    
+    // Actualizar permisos de un rol
+    Route::put('/{id}/permisos', [UserRoleController::class, 'updateRolePermissions']);
+    
+    // CRUD de roles
+    Route::post('/', [UserRoleController::class, 'store']);
+    Route::put('/{id}', [UserRoleController::class, 'update']);
+    Route::delete('/{id}', [UserRoleController::class, 'destroy']);
+});
 });
 
 /*
