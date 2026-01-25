@@ -14,16 +14,22 @@ class Pago extends Model
         'monto',
         'metodo_pago',
         'fecha_pago',
+        'fecha_vencimiento',
         'estado',
-        'observacion'
+        'observacion',
+       
+        'es_parcial',
+        'pago_grupo_id', // Asegúrate de que esté aquí
+        'numero_cuota'
     ];
 
     protected $casts = [
-        'monto' => 'decimal:2',
-        'fecha_pago' => 'date',
-        'created_at' => 'datetime',
-        'updated_at' => 'datetime'
+        'es_parcial' => 'boolean',
+        'pago_grupo_id' => 'integer', // Esto podría causar problemas si el valor es muy grande
+        'numero_cuota' => 'integer',
+        'monto' => 'decimal:2'
     ];
+
 
     // Relación con inscripción
     public function inscripcion()
@@ -84,5 +90,33 @@ class Pago extends Model
         ];
 
         return $estados[$this->estado] ?? $this->estado;
+    }
+
+    public function grupo()
+    {
+        return $this->hasMany(Pago::class, 'pago_grupo_id', 'pago_grupo_id');
+    }
+    
+    /**
+     * Verificar si este pago es completo
+     */
+    public function esCompleto()
+    {
+        return !$this->es_parcial || 
+               ($this->grupo()->where('estado', 'pendiente')->count() === 0);
+    }
+    
+    /**
+     * Obtener el saldo pendiente del grupo
+     */
+    public function saldoPendiente()
+    {
+        if (!$this->es_parcial || !$this->pago_grupo_id) {
+            return 0;
+        }
+        
+        return $this->grupo()
+            ->where('estado', 'pendiente')
+            ->sum('monto');
     }
 }

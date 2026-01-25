@@ -25,7 +25,7 @@ class UserController extends Controller
      }
 
     //store
-    public function funGuardar(Request $request){
+    public function store(Request $request){
         $usuario = new User();
         $usuario->name = $request->name;
         $usuario->email = $request->email;
@@ -46,7 +46,7 @@ class UserController extends Controller
     }
 
     //update
-    public function funModificar(Request $request, $id){
+    public function update(Request $request, $id){
         $usuario = User::find($id);
         $usuario->name = $request->name;
         $usuario->email = $request->email;

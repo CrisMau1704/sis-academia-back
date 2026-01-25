@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Log;
 
 class InscripcionController extends Controller
 {
-   public function index(Request $request)
+public function index(Request $request)
 {
     try {
         $query = Inscripcion::with([
@@ -39,11 +39,37 @@ class InscripcionController extends Controller
         foreach ($inscripciones as $inscripcion) {
             $inscripcion->clases_restantes_calculadas = $this->calcularClasesRestantes($inscripcion);
             $inscripcion->dias_restantes = $this->calcularDiasRestantes($inscripcion->fecha_fin);
+            
+            // ========== AÑADIR ESTO (igual que en show()) ==========
+            $totalClasesAsistidas = 0;
+            $totalClasesRestantes = 0;
+            $totalPermisosUsados = 0;
+            
+            // Calcular estadísticas desde inscripcion_horarios
+            foreach ($inscripcion->inscripcionHorarios as $inscripcionHorario) {
+                $totalClasesAsistidas += $inscripcionHorario->clases_asistidas ?? 0;
+                $totalClasesRestantes += $inscripcionHorario->clases_restantes ?? 0;
+                $totalPermisosUsados += $inscripcionHorario->permisos_usados ?? 0;
+            }
+            
+            // Crear objeto estadísticas (opcional, pero consistente con show())
+            $inscripcion->estadisticas = [
+                'clases_asistidas' => $totalClasesAsistidas,
+                'clases_restantes' => $totalClasesRestantes,
+                'permisos_usados' => $totalPermisosUsados,
+                'porcentaje_asistencia' => $inscripcion->clases_totales > 0 
+                    ? round(($totalClasesAsistidas / $inscripcion->clases_totales) * 100, 2)
+                    : 0
+            ];
+            
+            // También agregar el porcentaje directamente al objeto principal
+            // para que Vue pueda acceder a inscripcion.porcentaje_asistencia
+            $inscripcion->porcentaje_asistencia = $inscripcion->estadisticas['porcentaje_asistencia'];
         }
         
         return response()->json([
             'success' => true,
-            'data' => $inscripciones  // ← Array directo, no paginado
+            'data' => $inscripciones
         ]);
         
     } catch (\Exception $e) {
@@ -68,27 +94,37 @@ public function store(Request $request)
             'horarios' => 'required|array',
             'distribucion_horarios' => 'sometimes|array',
             'distribucion_horarios.*.horario_id' => 'required|exists:horarios,id',
-            'distribucion_horarios.*.clases_totales' => 'required|integer|min:1'
+            'distribucion_horarios.*.clases_totales' => 'required|integer|min:1',
+            'estado' => 'nullable|in:activo,suspendido,en_mora,vencido,finalizado,renovado',
+            // NUEVO: Campos para detectar pago parcial
+            'es_pago_parcial' => 'nullable|boolean',
+            'monto_pago_inicial' => 'nullable|numeric|min:0',
+            'monto_total' => 'nullable|numeric|min:0'
         ]);
         
         \Log::info('🔄 Iniciando creación de inscripción', [
             'estudiante_id' => $request->estudiante_id,
             'modalidad_id' => $request->modalidad_id,
-            'horarios_count' => count($request->horarios)
+            'estado_solicitado' => $request->estado ?? 'activo',
+            'horarios_count' => count($request->horarios),
+            'es_pago_parcial' => $request->es_pago_parcial ?? false,
+            'monto_pago_inicial' => $request->monto_pago_inicial ?? null,
+            'monto_total' => $request->monto_total ?? null
         ]);
         
         // ========== VALIDACIÓN 1: Verificar inscripción activa en misma modalidad ==========
         $inscripcionActivaExistente = DB::table('inscripciones')
             ->where('estudiante_id', $request->estudiante_id)
             ->where('modalidad_id', $request->modalidad_id)
-            ->where('estado', 'activo')
+            ->whereIn('estado', ['activo', 'en_mora'])
             ->first();
         
         if ($inscripcionActivaExistente) {
             return response()->json([
                 'success' => false,
-                'message' => 'El estudiante ya tiene una inscripción activa en esta modalidad',
-                'inscripcion_existente_id' => $inscripcionActivaExistente->id
+                'message' => 'El estudiante ya tiene una inscripción activa o en mora en esta modalidad',
+                'inscripcion_existente_id' => $inscripcionActivaExistente->id,
+                'estado_existente' => $inscripcionActivaExistente->estado
             ], 409);
         }
         
@@ -98,9 +134,9 @@ public function store(Request $request)
             $horarioExistente = DB::table('inscripcion_horarios as ih')
                 ->join('inscripciones as i', 'ih.inscripcion_id', '=', 'i.id')
                 ->where('i.estudiante_id', $request->estudiante_id)
-                ->where('i.estado', 'activo')
+                ->whereIn('i.estado', ['activo', 'en_mora'])
                 ->where('ih.horario_id', $horarioId)
-                ->select('ih.id', 'i.id as inscripcion_id')
+                ->select('ih.id', 'i.id as inscripcion_id', 'i.estado')
                 ->first();
             
             if ($horarioExistente) {
@@ -115,7 +151,8 @@ public function store(Request $request)
                     'hora_inicio' => $horarioInfo->hora_inicio ?? '',
                     'hora_fin' => $horarioInfo->hora_fin ?? '',
                     'nombre_horario' => $horarioInfo->nombre ?? '',
-                    'inscripcion_existente_id' => $horarioExistente->inscripcion_id
+                    'inscripcion_existente_id' => $horarioExistente->inscripcion_id,
+                    'estado_existente' => $horarioExistente->estado
                 ];
             }
         }
@@ -240,6 +277,44 @@ public function store(Request $request)
         
         $clasesTotalesReales = max(1, $clasesTotalesReales);
         
+        // ========== DETERMINAR ESTADO FINAL - CORREGIDO ==========
+        // Lógica mejorada para determinar el estado inicial
+        $estadoFinal = $request->estado ?? 'activo'; // Por defecto
+        
+        // Detectar automáticamente si es pago parcial
+        $esPagoParcial = false;
+        $observaciones = $request->observaciones ?? null;
+        
+        // Opción 1: Si viene explícitamente indicado desde el frontend
+        if ($request->has('es_pago_parcial') && $request->es_pago_parcial == true) {
+            $esPagoParcial = true;
+            $estadoFinal = 'en_mora';
+            $observaciones = 'Inscripción creada con estado EN MORA por pago parcial/dividido. ' . ($observaciones ?? '');
+            \Log::warning("⚠️ Pago parcial detectado explícitamente → Estado: EN MORA");
+        }
+        // Opción 2: Si detectamos pago parcial por los montos
+        elseif ($request->has('monto_pago_inicial') && $request->has('monto_total') 
+                && $request->monto_pago_inicial > 0 
+                && $request->monto_total > 0 
+                && $request->monto_pago_inicial < $request->monto_total) {
+            $esPagoParcial = true;
+            $estadoFinal = 'en_mora';
+            $observaciones = 'Inscripción creada con estado EN MORA por pago parcial/dividido. ' . ($observaciones ?? '');
+            \Log::warning("⚠️ Pago parcial detectado por montos → Estado: EN MORA");
+        }
+        // Opción 3: Si el estado viene como 'en_mora' explícitamente
+        elseif ($estadoFinal === 'en_mora') {
+            $esPagoParcial = true;
+            $observaciones = 'Inscripción creada con estado EN MORA por pago parcial/dividido. ' . ($observaciones ?? '');
+            \Log::warning("⚠️ Estado EN MORA recibido explícitamente");
+        }
+        
+        \Log::info("🎯 Estado final de inscripción: {$estadoFinal}", [
+            'es_pago_parcial' => $esPagoParcial,
+            'monto_pago_inicial' => $request->monto_pago_inicial ?? null,
+            'monto_total' => $request->monto_total ?? null
+        ]);
+        
         // ========== CREAR LA INSCRIPCIÓN ==========
         $inscripcionId = DB::table('inscripciones')->insertGetId([
             'estudiante_id' => $request->estudiante_id,
@@ -253,12 +328,13 @@ public function store(Request $request)
             'permisos_usados' => 0,
             'permisos_disponibles' => $permisosMaximos,
             'monto_mensual' => $montoMensual,
-            'estado' => 'activo',
+            'estado' => $estadoFinal,
+            'observaciones' => $observaciones,
             'created_at' => now(),
             'updated_at' => now()
         ]);
         
-        \Log::info("✅ Inscripción creada con ID: {$inscripcionId}");
+        \Log::info("✅ Inscripción creada con ID: {$inscripcionId}, Estado: {$estadoFinal}");
         
         // ========== DISTRIBUIR CLASES ENTRE HORARIOS ==========
         $totalClasesGeneradas = 0;
@@ -384,6 +460,18 @@ public function store(Request $request)
             }
         }
         
+        // ========== INFORMACIÓN ADICIONAL PARA EL FRONTEND ==========
+        $infoPagoParcial = null;
+        if ($esPagoParcial) {
+            $infoPagoParcial = [
+                'es_pago_parcial' => true,
+                'estado_inicial' => 'en_mora',
+                'observaciones' => 'La inscripción se creó en estado EN MORA. Cambiará a ACTIVO cuando complete el pago total.',
+                'monto_pagado' => $request->monto_pago_inicial ?? 0,
+                'monto_pendiente' => $montoMensual - ($request->monto_pago_inicial ?? 0)
+            ];
+        }
+        
         // ========== OBTENER INFORMACIÓN COMPLETA PARA LA RESPUESTA ==========
         $inscripcionCreada = DB::table('inscripciones')
             ->where('id', $inscripcionId)
@@ -407,16 +495,20 @@ public function store(Request $request)
         DB::commit();
         
         \Log::info("🎉 Inscripción #{$inscripcionId} completada exitosamente", [
+            'estado' => $estadoFinal,
             'clases_totales' => $clasesTotalesReales,
             'clases_generadas' => $totalClasesGeneradas,
-            'horarios_asignados' => $horariosAsignados->count()
+            'horarios_asignados' => $horariosAsignados->count(),
+            'es_pago_parcial' => $esPagoParcial
         ]);
         
         // ========== RESPUESTA EXITOSA ==========
         return response()->json([
             'success' => true,
             'inscripcion_id' => $inscripcionId,
-            'message' => 'Inscripción creada exitosamente con clases REALES programadas',
+            'message' => $esPagoParcial 
+                ? 'Inscripción creada exitosamente en estado EN MORA (pago parcial)' 
+                : 'Inscripción creada exitosamente con clases REALES programadas',
             'data' => [
                 'inscripcion' => $inscripcionCreada,
                 'horarios' => $horariosAsignados,
@@ -424,7 +516,9 @@ public function store(Request $request)
                 'clases_generadas' => $totalClasesGeneradas,
                 'clases_modalidad' => $clasesMensuales,
                 'meses_duracion' => round($mesesDuracion, 2),
-                'distribucion_por_horario' => $request->distribucion_horarios ?? null
+                'distribucion_por_horario' => $request->distribucion_horarios ?? null,
+                'estado_creado' => $estadoFinal,
+                'info_pago_parcial' => $infoPagoParcial
             ]
         ]);
         
@@ -461,7 +555,6 @@ public function store(Request $request)
         ], 500);
     }
 }
-
 
 // En App\Http\Controllers\InscripcionController.php
 public function incrementarAsistencia($id, Request $request)
@@ -839,19 +932,20 @@ public function show($id)
         'entrenador',
         'horarios.disciplina', 
         'horarios.entrenador',
-        'horarios.sucursal'
+        'horarios.sucursal',
+        'inscripcionHorarios' // Asegúrate de cargar esto también
     ])->findOrFail($id);
     
-    // Accede a los datos del pivot directamente
+    // Accede a los datos de inscripcion_horarios
     $totalClasesAsistidas = 0;
     $totalClasesRestantes = 0;
     $totalPermisosUsados = 0;
     
-    // Calcular estadísticas desde el pivot
-    foreach ($inscripcion->horarios as $horario) {
-        $totalClasesAsistidas += $horario->pivot->clases_asistidas ?? 0;
-        $totalClasesRestantes += $horario->pivot->clases_restantes ?? 0;
-        $totalPermisosUsados += $horario->pivot->permisos_usados ?? 0;
+    // Calcular estadísticas desde inscripcion_horarios
+    foreach ($inscripcion->inscripcionHorarios as $inscripcionHorario) {
+        $totalClasesAsistidas += $inscripcionHorario->clases_asistidas ?? 0;
+        $totalClasesRestantes += $inscripcionHorario->clases_restantes ?? 0;
+        $totalPermisosUsados += $inscripcionHorario->permisos_usados ?? 0;
     }
     
     $inscripcion->estadisticas = [
@@ -863,12 +957,14 @@ public function show($id)
             : 0
     ];
     
+    // También agregar el porcentaje directamente
+    $inscripcion->porcentaje_asistencia = $inscripcion->estadisticas['porcentaje_asistencia'];
+    
     return response()->json([
         'success' => true,
         'data' => $inscripcion
     ]);
 }
-
     public function update(Request $request, $id)
     {
         DB::beginTransaction();
@@ -1328,6 +1424,66 @@ public function generarClasesProgramadas($inscripcionId, Request $request)
         ], 500);
     }
 }
+
+// En InscripcionController.php
+public function estadoFinanciero($id)
+{
+    try {
+        $inscripcion = Inscripcion::with(['pagos' => function($query) {
+            $query->orderBy('created_at', 'desc');
+        }])->findOrFail($id);
+        
+        // Calcular total pagado
+        $totalPagado = $inscripcion->pagos
+            ->where('estado', 'pagado')
+            ->sum('monto');
+        
+        // Identificar pagos pendientes
+        $pagosPendientes = $inscripcion->pagos
+            ->whereIn('estado', ['pendiente', 'vencido'])
+            ->values();
+        
+        // Buscar primera y segunda cuota
+        $primeraCuota = $inscripcion->pagos
+            ->where('es_parcial', true)
+            ->where('numero_cuota', 1)
+            ->where('estado', 'pagado')
+            ->first();
+            
+        $segundaCuotaPendiente = $inscripcion->pagos
+            ->where('es_parcial', true)
+            ->where('numero_cuota', 2)
+            ->where('estado', 'pendiente')
+            ->first();
+        
+        $montoTotal = $inscripcion->monto_mensual;
+        $saldoPendiente = max(0, $montoTotal - $totalPagado);
+        
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'inscripcion_id' => $inscripcion->id,
+                'total_inscripcion' => (float) $montoTotal,
+                'total_pagado' => (float) $totalPagado,
+                'saldo_pendiente' => (float) $saldoPendiente,
+                'pagos_pendientes' => $pagosPendientes,
+                'primera_cuota' => $primeraCuota,
+                'segunda_cuota_pendiente' => $segundaCuotaPendiente,
+                'estado_actual' => $inscripcion->estado
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('Error obteniendo estado financiero: ' . $e->getMessage());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error obteniendo estado financiero',
+            'error' => env('APP_DEBUG') ? $e->getMessage() : null
+        ], 500);
+    }
+}
+
 
   public function registrarAsistencia($id, Request $request)
 {

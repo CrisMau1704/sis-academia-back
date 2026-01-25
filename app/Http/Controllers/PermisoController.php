@@ -341,6 +341,451 @@ class PermisoController extends Controller
         ]);
     }
 
+    // ========== MÉTODOS PARA PERMISOS JUSTIFICADOS Y RECUPERACIONES ==========
+
+/**
+ * Obtener permisos justificados por inscripción (para recuperaciones)
+ */
+public function justificadosPorInscripcion(Request $request)
+{
+    $request->validate([
+        'inscripcion_id' => 'required|integer|exists:inscripciones,id',
+        'estado' => 'nullable|in:aprobado,rechazado,pendiente'
+    ]);
+    
+    try {
+        $query = PermisoJustificado::where('inscripcion_id', $request->inscripcion_id)
+            ->with(['inscripcion.estudiante', 'asistencia.horario.modalidad', 'administrador']);
+        
+        if ($request->has('estado')) {
+            $query->where('estado', $request->estado);
+        }
+        
+        $permisos = $query->orderBy('fecha_falta', 'desc')->get();
+        
+        // Calcular fecha límite de recuperación (15 días después de fecha_fin de inscripción)
+        $inscripcion = Inscripcion::find($request->inscripcion_id);
+        $fechaFinInscripcion = Carbon::parse($inscripcion->fecha_fin);
+        $fechaLimiteRecuperacion = $fechaFinInscripcion->copy()->addDays(15);
+        
+        $permisosConFechaLimite = $permisos->map(function ($permiso) use ($fechaLimiteRecuperacion, $inscripcion) {
+            $permiso->fecha_limite_recuperacion = $fechaLimiteRecuperacion->format('Y-m-d');
+            $permiso->fecha_fin_inscripcion = $inscripcion->fecha_fin;
+            $permiso->puede_recuperar = Carbon::now() <= $fechaLimiteRecuperacion && 
+                                        $permiso->estado === 'aprobado' && 
+                                        !$this->tieneRecuperacion($permiso->id);
+            return $permiso;
+        });
+        
+        return response()->json([
+            'success' => true,
+            'data' => $permisosConFechaLimite,
+            'total' => $permisosConFechaLimite->count(),
+            'fechas' => [
+                'fecha_fin_inscripcion' => $inscripcion->fecha_fin,
+                'fecha_limite_recuperacion' => $fechaLimiteRecuperacion->format('Y-m-d'),
+                'dias_restantes' => Carbon::now()->diffInDays($fechaLimiteRecuperacion, false)
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error obteniendo permisos justificados: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+/**
+ * Obtener permisos recuperables (aprobados sin recuperación)
+ */
+public function permisosRecuperables(Request $request)
+{
+    $request->validate([
+        'inscripcion_id' => 'required|integer|exists:inscripciones,id'
+    ]);
+    
+    try {
+        // Obtener inscripción
+        $inscripcion = Inscripcion::with(['estudiante'])->findOrFail($request->inscripcion_id);
+        
+        // Calcular fecha límite de recuperación
+        $fechaFinInscripcion = Carbon::parse($inscripcion->fecha_fin);
+        $fechaLimiteRecuperacion = $fechaFinInscripcion->copy()->addDays(15);
+        
+        // Obtener permisos aprobados
+        $permisos = PermisoJustificado::where('inscripcion_id', $request->inscripcion_id)
+            ->where('estado', 'aprobado')
+            ->with(['asistencia.horario.modalidad', 'asistencia.horario.entrenador'])
+            ->orderBy('fecha_falta', 'desc')
+            ->get();
+        
+        // Filtrar permisos que no tengan recuperación y estén dentro del plazo
+        $hoy = Carbon::now();
+        $permisosRecuperables = [];
+        
+        foreach ($permisos as $permiso) {
+            // Verificar si ya tiene recuperación
+            $tieneRecuperacion = DB::table('recuperacion_clases')
+                ->where('permiso_justificado_id', $permiso->id)
+                ->whereIn('estado', ['programada', 'completada'])
+                ->exists();
+            
+            // Solo incluir si no tiene recuperación y está dentro del plazo
+            if (!$tieneRecuperacion && $hoy <= $fechaLimiteRecuperacion) {
+                $permisosRecuperables[] = [
+                    'id' => $permiso->id,
+                    'inscripcion_id' => $permiso->inscripcion_id,
+                    'estudiante_id' => $inscripcion->estudiante_id,
+                    'estudiante_nombre' => $inscripcion->estudiante->nombres . ' ' . $inscripcion->estudiante->apellidos,
+                    'asistencia_id' => $permiso->asistencia_id,
+                    'fecha_falta' => $permiso->fecha_falta,
+                    'motivo' => $permiso->motivo,
+                    'evidencia' => $permiso->evidencia,
+                    'horario_falta' => $permiso->asistencia->horario ?? null,
+                    'fecha_limite_recuperacion' => $fechaLimiteRecuperacion->format('Y-m-d'),
+                    'dias_restantes' => $hoy->diffInDays($fechaLimiteRecuperacion, false),
+                    'puede_recuperar' => true,
+                    'estado' => 'disponible_para_recuperacion'
+                ];
+            }
+        }
+        
+        return response()->json([
+            'success' => true,
+            'data' => $permisosRecuperables,
+            'total' => count($permisosRecuperables),
+            'inscripcion' => [
+                'id' => $inscripcion->id,
+                'estudiante' => $inscripcion->estudiante,
+                'fecha_fin' => $inscripcion->fecha_fin,
+                'fecha_limite_recuperacion' => $fechaLimiteRecuperacion->format('Y-m-d'),
+                'clases_asistidas' => $inscripcion->clases_asistidas,
+                'clases_totales' => $inscripcion->clases_totales
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error obteniendo permisos recuperables: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+/**
+ * Verificar si un permiso tiene recuperación
+ */
+public function tieneRecuperacion($id)
+{
+    try {
+        $permiso = PermisoJustificado::findOrFail($id);
+        
+        $tieneRecuperacion = DB::table('recuperacion_clases')
+            ->where('permiso_justificado_id', $id)
+            ->whereIn('estado', ['programada', 'completada'])
+            ->exists();
+        
+        return response()->json([
+            'success' => true,
+            'tiene_recuperacion' => $tieneRecuperacion,
+            'permiso' => $permiso
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error verificando recuperación: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+/**
+ * Crear permiso justificado (para justificaciones rápidas)
+ */
+public function crearJustificacion(Request $request)
+{
+    DB::beginTransaction();
+    
+    try {
+        $request->validate([
+            'inscripcion_id' => 'required|exists:inscripciones,id',
+            'estudiante_id' => 'required|exists:estudiantes,id',
+            'horario_id' => 'required|exists:horarios,id',
+            'fecha_falta' => 'required|date|before_or_equal:today',
+            'motivo' => 'required|string|min:5|max:500',
+            'observacion' => 'nullable|string|max:1000',
+            'usuario_id' => 'required|exists:users,id'
+        ]);
+        
+        // Verificar que la fecha de falta no sea futura
+        if (Carbon::parse($request->fecha_falta)->isFuture()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'La fecha de falta no puede ser futura'
+            ], 400);
+        }
+        
+        // Obtener inscripción
+        $inscripcion = Inscripcion::findOrFail($request->inscripcion_id);
+        
+        // Verificar límite de permisos (3 por mes)
+        $permisosMes = $inscripcion->permisosJustificados()
+            ->whereMonth('fecha_falta', Carbon::parse($request->fecha_falta)->month)
+            ->whereYear('fecha_falta', Carbon::parse($request->fecha_falta)->year)
+            ->count();
+            
+        if ($permisosMes >= 3) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Límite de 3 permisos por mes alcanzado'
+            ], 400);
+        }
+        
+        // Buscar o crear asistencia
+        $asistencia = Asistencia::where('inscripcion_id', $request->inscripcion_id)
+            ->where('horario_id', $request->horario_id)
+            ->whereDate('fecha', $request->fecha_falta)
+            ->first();
+        
+        if (!$asistencia) {
+            $asistencia = Asistencia::create([
+                'inscripcion_id' => $request->inscripcion_id,
+                'horario_id' => $request->horario_id,
+                'fecha' => $request->fecha_falta,
+                'estado' => 'permiso',
+                'observacion' => 'Justificado: ' . $request->motivo,
+                'recuperada' => false
+            ]);
+        } else {
+            // Actualizar asistencia existente
+            $asistencia->update([
+                'estado' => 'permiso',
+                'observacion' => 'Justificado: ' . $request->motivo
+            ]);
+        }
+        
+        // Crear permiso justificado
+        $permiso = PermisoJustificado::create([
+            'inscripcion_id' => $request->inscripcion_id,
+            'asistencia_id' => $asistencia->id,
+            'fecha_solicitud' => now(),
+            'fecha_falta' => $request->fecha_falta,
+            'motivo' => $request->motivo,
+            'estado' => 'aprobado', // Directamente aprobado
+            'evidencia' => $request->observacion,
+            'administrador_id' => $request->usuario_id
+        ]);
+        
+        // Actualizar contadores de la inscripción
+        $inscripcion->increment('permisos_usados');
+        $inscripcion->decrement('permisos_disponibles');
+        
+        DB::commit();
+        
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'permiso' => $permiso->load(['inscripcion.estudiante', 'asistencia.horario', 'administrador']),
+                'asistencia' => $asistencia,
+                'inscripcion' => $inscripcion->fresh()
+            ],
+            'message' => 'Permiso justificado creado exitosamente'
+        ], 201);
+        
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return response()->json([
+            'success' => false,
+            'message' => 'Error creando permiso justificado: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+// ========== MÉTODOS PARA ESTADÍSTICAS ==========
+
+/**
+ * Obtener estadísticas de permisos
+ */
+public function estadisticas(Request $request)
+{
+    try {
+        $request->validate([
+            'fecha_inicio' => 'required|date',
+            'fecha_fin' => 'required|date|after_or_equal:fecha_inicio'
+        ]);
+        
+        $estadisticas = DB::table('permisos_justificados')
+            ->select(
+                DB::raw('COUNT(*) as total_permisos'),
+                DB::raw('SUM(CASE WHEN estado = "aprobado" THEN 1 ELSE 0 END) as aprobados'),
+                DB::raw('SUM(CASE WHEN estado = "rechazado" THEN 1 ELSE 0 END) as rechazados'),
+                DB::raw('SUM(CASE WHEN estado = "pendiente" THEN 1 ELSE 0 END) as pendientes')
+            )
+            ->whereBetween('fecha_falta', [$request->fecha_inicio, $request->fecha_fin])
+            ->first();
+        
+        // Permisos por motivo (top 5)
+        $motivosMasComunes = DB::table('permisos_justificados')
+            ->select('motivo', DB::raw('COUNT(*) as total'))
+            ->whereBetween('fecha_falta', [$request->fecha_inicio, $request->fecha_fin])
+            ->whereNotNull('motivo')
+            ->groupBy('motivo')
+            ->orderBy('total', 'desc')
+            ->limit(5)
+            ->get();
+        
+        // Permisos por día de la semana
+        $permisosPorDia = DB::table('permisos_justificados')
+            ->select(
+                DB::raw('DAYNAME(fecha_falta) as dia_semana'),
+                DB::raw('COUNT(*) as total')
+            )
+            ->whereBetween('fecha_falta', [$request->fecha_inicio, $request->fecha_fin])
+            ->groupBy(DB::raw('DAYNAME(fecha_falta)'))
+            ->orderBy(DB::raw('FIELD(dia_semana, "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")'))
+            ->get();
+        
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'periodo' => [
+                    'fecha_inicio' => $request->fecha_inicio,
+                    'fecha_fin' => $request->fecha_fin
+                ],
+                'estadisticas_generales' => $estadisticas,
+                'motivos_mas_comunes' => $motivosMasComunes,
+                'permisos_por_dia_semana' => $permisosPorDia
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error obteniendo estadísticas: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+/**
+ * Obtener permisos próximos a vencer (para recuperaciones)
+ */
+public function proximosAVencer(Request $request)
+{
+    try {
+        $dias = $request->get('dias', 7);
+        
+        $hoy = Carbon::now();
+        $fechaLimite = $hoy->copy()->addDays($dias);
+        
+        // Obtener inscripciones con permisos aprobados
+        $inscripciones = Inscripcion::whereHas('permisosJustificados', function ($query) use ($hoy, $fechaLimite) {
+            $query->where('estado', 'aprobado')
+                  ->whereDate('fecha_fin_inscripcion', '>=', $hoy)
+                  ->whereDate('fecha_fin_inscripcion', '<=', $fechaLimite);
+        })
+        ->with(['permisosJustificados' => function ($query) {
+            $query->where('estado', 'aprobado');
+        }, 'estudiante'])
+        ->get();
+        
+        $permisosPorVencer = [];
+        
+        foreach ($inscripciones as $inscripcion) {
+            $fechaFin = Carbon::parse($inscripcion->fecha_fin);
+            $diasRestantes = $hoy->diffInDays($fechaFin, false);
+            
+            if ($diasRestantes >= 0 && $diasRestantes <= $dias) {
+                foreach ($inscripcion->permisosJustificados as $permiso) {
+                    $permisosPorVencer[] = [
+                        'inscripcion_id' => $inscripcion->id,
+                        'estudiante' => $inscripcion->estudiante,
+                        'permiso_id' => $permiso->id,
+                        'fecha_falta' => $permiso->fecha_falta,
+                        'motivo' => $permiso->motivo,
+                        'fecha_fin_inscripcion' => $inscripcion->fecha_fin,
+                        'fecha_limite_recuperacion' => $fechaFin->copy()->addDays(15)->format('Y-m-d'),
+                        'dias_restantes_inscripcion' => $diasRestantes,
+                        'dias_restantes_recuperacion' => $hoy->diffInDays($fechaFin->copy()->addDays(15), false)
+                    ];
+                }
+            }
+        }
+        
+        return response()->json([
+            'success' => true,
+            'data' => $permisosPorVencer,
+            'total' => count($permisosPorVencer),
+            'periodo_dias' => $dias
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error obteniendo permisos por vencer: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+// ========== MÉTODOS PARA EL SISTEMA DE ASISTENCIAS ==========
+
+/**
+ * Justificar ausencia (para uso desde asistencia.vue)
+ */
+public function justificarAusencia(Request $request)
+{
+    return $this->crearJustificacion($request);
+}
+
+/**
+ * Obtener permisos por estudiante y fecha
+ */
+public function porEstudianteYFecha(Request $request)
+{
+    $request->validate([
+        'estudiante_id' => 'required|exists:estudiantes,id',
+        'fecha' => 'required|date'
+    ]);
+    
+    try {
+        // Buscar inscripciones activas del estudiante
+        $inscripciones = Inscripcion::where('estudiante_id', $request->estudiante_id)
+            ->where('estado', 'activo')
+            ->whereDate('fecha_inicio', '<=', $request->fecha)
+            ->whereDate('fecha_fin', '>=', $request->fecha)
+            ->get();
+        
+        $permisos = [];
+        
+        foreach ($inscripciones as $inscripcion) {
+            $permisosInscripcion = PermisoJustificado::where('inscripcion_id', $inscripcion->id)
+                ->whereDate('fecha_falta', $request->fecha)
+                ->where('estado', 'aprobado')
+                ->with(['asistencia.horario'])
+                ->get();
+            
+            foreach ($permisosInscripcion as $permiso) {
+                $permisos[] = $permiso;
+            }
+        }
+        
+        return response()->json([
+            'success' => true,
+            'data' => $permisos,
+            'total' => count($permisos),
+            'fecha' => $request->fecha,
+            'estudiante_id' => $request->estudiante_id
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error obteniendo permisos: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+
 
 
     

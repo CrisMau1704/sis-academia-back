@@ -151,6 +151,8 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
         Route::get('/{id}/control-clases', [InscripcionController::class, 'controlClases']);
         Route::put('/{id}/actualizar-clases', [InscripcionController::class, 'actualizarContadorClases']);
         Route::get('/estudiante/{estudianteId}/activa', [InscripcionController::class, 'inscripcionActiva']);
+
+        Route::get('/inscripciones/{id}/estado-financiero', [InscripcionController::class, 'estadoFinanciero']);
         
         // ========== RUTAS CLAVE PARA ACTUALIZAR ASISTENCIAS ==========
         
@@ -323,80 +325,79 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
 
 
     /*
-    |--------------------------------------------------------------------------
-    | PERMISOS JUSTIFICADOS
-    |--------------------------------------------------------------------------
-    */
-    Route::prefix('permisos')->group(function () {
-        Route::get('/', [PermisoController::class, 'index']);
-        Route::post('/', [PermisoController::class, 'store']);
-        Route::get('/{id}', [PermisoController::class, 'show']);
-        Route::put('/{id}', [PermisoController::class, 'update']);
-        Route::delete('/{id}', [PermisoController::class, 'destroy']);
-        
-        // Estados
-        Route::put('/{id}/aprobar', [PermisoController::class, 'aprobar']);
-        Route::put('/{id}/rechazar', [PermisoController::class, 'rechazar']);
-        
-        // Filtros específicos
-        Route::get('/pendientes', [PermisoController::class, 'pendientes']);
-        Route::get('/aprobados', [PermisoController::class, 'aprobados']);
-        Route::get('/rechazados', [PermisoController::class, 'rechazados']);
-        
-        // Por relación
-        Route::get('/inscripcion/{inscripcionId}', [PermisoController::class, 'porInscripcion']);
-        Route::get('/estudiante/{estudianteId}', [PermisoController::class, 'porEstudiante']);
-        
-        // Verificación y control
-        Route::get('/verificar-disponibilidad/{inscripcionId}', [PermisoController::class, 'verificarDisponibilidad']);
-        Route::get('/contador-mensual/{inscripcionId}', [PermisoController::class, 'contadorMensual']);
-        
-        // Acciones en lote
-        Route::post('/aprobar-lote', [PermisoController::class, 'aprobarLote']);
-        Route::post('/rechazar-lote', [PermisoController::class, 'rechazarLote']);
-        
-        // Reportes
-        Route::get('/reporte/mensual', [PermisoController::class, 'reporteMensual']);
-        Route::get('/reporte/estudiante/{estudianteId}', [PermisoController::class, 'reporteEstudiante']);
-    });
+|--------------------------------------------------------------------------
+| PERMISOS JUSTIFICADOS (ESPECÍFICOS PARA RECUPERACIONES)
+|--------------------------------------------------------------------------
+*/
+Route::prefix('permisos-justificados')->group(function () {
+    // Obtener permisos justificados por inscripción
+    Route::get('/por-inscripcion', [PermisoController::class, 'justificadosPorInscripcion']);
+    
+    // Obtener permisos recuperables (aprobados y sin recuperación)
+    Route::get('/recuperables', [PermisoController::class, 'permisosRecuperables']);
+    
+    // Verificar si un permiso tiene recuperación
+    Route::get('/{id}/tiene-recuperacion', [PermisoController::class, 'tieneRecuperacion']);
+    
+    // Crear permiso justificado
+    Route::post('/', [PermisoController::class, 'crearJustificacion']);
+    
+    // Obtener permiso justificado específico
+    Route::get('/{id}', [PermisoController::class, 'mostrarJustificado']);
+    
+    // Actualizar permiso justificado
+    Route::put('/{id}', [PermisoController::class, 'actualizarJustificado']);
+    
+    // Eliminar permiso justificado
+    Route::delete('/{id}', [PermisoController::class, 'eliminarJustificado']);
+Route::get('/justificados/por-inscripcion', [PermisoController::class, 'justificadosPorInscripcion']);
+    Route::get('/justificados/recuperables', [PermisoController::class, 'permisosRecuperables']);
+    Route::get('/justificados/{id}/tiene-recuperacion', [PermisoController::class, 'tieneRecuperacion']);
+    Route::post('/justificados', [PermisoController::class, 'crearJustificacion']);
+    
+    // Estadísticas
+    Route::get('/estadisticas', [PermisoController::class, 'estadisticas']);
+    Route::get('/proximos-a-vencer', [PermisoController::class, 'proximosAVencer']);
+    
+    // Para asistencias
+    Route::post('/justificar-ausencia', [PermisoController::class, 'justificarAusencia']);
+    Route::get('/por-estudiante-fecha', [PermisoController::class, 'porEstudianteYFecha']);
+    
+});
 
     /*
     |--------------------------------------------------------------------------
     | RECUPERACIONES DE CLASES
     |--------------------------------------------------------------------------
     */
-    Route::prefix('recuperaciones')->group(function () {
-        // CRUD básico
-        Route::get('/', [RecuperacionController::class, 'index']);
-        Route::post('/', [RecuperacionController::class, 'store']);
-        Route::get('/{id}', [RecuperacionController::class, 'show']);
-        Route::put('/{id}', [RecuperacionController::class, 'update']);
-        Route::delete('/{id}', [RecuperacionController::class, 'destroy']);
-        
-        // Estados
-        Route::put('/{id}/completar', [RecuperacionController::class, 'completar']);
-        Route::put('/{id}/cancelar', [RecuperacionController::class, 'cancelar']);
-        
-        // Filtros
-        Route::get('/pendientes', [RecuperacionController::class, 'pendientes']);
-        Route::get('/completadas', [RecuperacionController::class, 'completadas']);
-        Route::get('/canceladas', [RecuperacionController::class, 'canceladas']);
-        
-        // Por relación
-        Route::get('/estudiante/{estudianteId}', [RecuperacionController::class, 'porEstudiante']);
-        Route::get('/inscripcion/{inscripcionId}', [RecuperacionController::class, 'porInscripcion']);
-        
-        // Horarios disponibles
-        Route::get('/horarios-disponibles', [RecuperacionController::class, 'horariosDisponibles']);
-        
-        // Verificación
-        Route::get('/verificar-periodo/{inscripcionId}', [RecuperacionController::class, 'verificarPeriodoRecuperacion']);
-        Route::get('/faltas-recuperables/{inscripcionId}', [RecuperacionController::class, 'faltasRecuperables']);
-        
-        // Reportes
-        Route::get('/reporte/mensual', [RecuperacionController::class, 'reporteMensual']);
-        Route::get('/reporte/vencimientos', [RecuperacionController::class, 'reporteVencimientos']);
-    });
+    // routes/api.php
+
+Route::prefix('recuperaciones')->group(function () {
+    // CRUD básico
+    Route::get('/', [RecuperacionController::class, 'index']);
+    Route::post('/', [RecuperacionController::class, 'store']);
+    Route::get('/{id}', [RecuperacionController::class, 'show']);
+    Route::put('/{id}', [RecuperacionController::class, 'update']);
+    Route::delete('/{id}', [RecuperacionController::class, 'destroy']);
+    
+    // Estados
+    Route::post('/{id}/completar', [RecuperacionController::class, 'completar']);
+    Route::post('/{id}/cancelar', [RecuperacionController::class, 'cancelar']);
+    
+    // Consultas específicas
+    Route::get('/inscripcion/{inscripcionId}', [RecuperacionController::class, 'porInscripcion']);
+    Route::get('/estudiante/{estudianteId}', [RecuperacionController::class, 'porEstudiante']);
+    Route::get('/{inscripcionId}/permisos-recuperables', [RecuperacionController::class, 'permisosRecuperables']);
+    
+    // Horarios disponibles
+    Route::get('/horarios/disponibles', [RecuperacionController::class, 'horariosDisponibles']);
+    
+    // Verificación
+    Route::get('/{inscripcionId}/verificar-periodo', [RecuperacionController::class, 'verificarPeriodo']);
+    
+    // Reportes
+    Route::get('/reporte/mensual', [RecuperacionController::class, 'reporteMensual']);
+});
 
     /*
     |--------------------------------------------------------------------------
