@@ -24,7 +24,7 @@ class PagoController extends Controller
     
     return response()->json([
         'success' => true,
-        'data' => $pagos  // ¡IMPORTANTE: devolver como array en 'data'!
+        'data' => $pagos  
     ]);
 }
     
@@ -33,10 +33,17 @@ public function store(Request $request)
     // Para depurar lo que recibes
     Log::info('Datos recibidos en PagoController@store:', $request->all());
     
-    // ========== VALIDACIÓN MEJORADA ==========
+    // ========== VALIDACIÓN MEJORADA CON CAMPOS DE DESCUENTO ==========
     $validated = $request->validate([
         'inscripcion_id' => 'required|exists:inscripciones,id',
         'monto' => 'required|numeric|min:0.01',
+        
+        // CAMPOS DE DESCUENTO NUEVOS
+        'descuento_porcentaje' => 'nullable|numeric|min:0|max:100',
+        'descuento_monto' => 'nullable|numeric|min:0',
+        'subtotal' => 'nullable|numeric|min:0',
+        'total_final' => 'nullable|numeric|min:0',
+        
         'metodo_pago' => 'nullable|string|in:efectivo,qr,tarjeta,transferencia',
         'fecha_pago' => 'nullable|date',
         'fecha_vencimiento' => 'nullable|date',
@@ -45,7 +52,7 @@ public function store(Request $request)
         
         // Campos para pagos parciales
         'es_parcial' => 'nullable|boolean',
-        'pago_grupo_id' => 'nullable|string', // Cambiar a string
+        'pago_grupo_id' => 'nullable|string',
         'numero_cuota' => 'nullable|integer|min:1|max:2'
     ]);
     
@@ -60,7 +67,78 @@ public function store(Request $request)
             ], 422);
         }
         
-        // ========== 2. VALIDACIÓN ESPECÍFICA PARA SEGUNDA CUOTA ==========
+        // ========== 2. CALCULAR MONTO REAL A PAGAR (CONSIDERANDO DESCUENTOS EXISTENTES) ==========
+        $montoRealAPagar = $inscripcion->monto_mensual; // Precio original por defecto
+        
+        // Verificar si ya hay pagos con descuento para esta inscripción
+        $pagoConDescuentoExistente = Pago::where('inscripcion_id', $request->inscripcion_id)
+            ->where(function($query) {
+                $query->where('descuento_monto', '>', 0)
+                    ->orWhere('descuento_porcentaje', '>', 0);
+            })
+            ->first();
+        
+        if ($pagoConDescuentoExistente) {
+            // Si ya existe un pago con descuento, usar ESE total_final
+            $montoRealAPagar = $pagoConDescuentoExistente->total_final;
+            Log::info('Usando descuento existente de pago #' . $pagoConDescuentoExistente->id, [
+                'total_final_existente' => $montoRealAPagar,
+                'monto_original' => $inscripcion->monto_mensual
+            ]);
+        }
+        
+        // ========== 3. CALCULAR CAMPOS DE DESCUENTO PARA ESTE PAGO ==========
+        $descuentoPorcentaje = $request->descuento_porcentaje ?? 0;
+        $descuentoMonto = $request->descuento_monto ?? 0;
+        
+        // Determinar subtotal (precio sin descuento)
+        $subtotal = $request->subtotal ?? $inscripcion->monto_mensual;
+        
+        // Si el frontend NO envió subtotal, calcularlo
+        if (!$request->has('subtotal')) {
+            $subtotal = $inscripcion->monto_mensual;
+        }
+        
+        // Calcular descuento si se proporcionó porcentaje
+        if ($descuentoPorcentaje > 0 && $descuentoMonto == 0) {
+            $descuentoMonto = $subtotal * ($descuentoPorcentaje / 100);
+        }
+        
+        // Calcular porcentaje si se proporcionó monto
+        if ($descuentoMonto > 0 && $descuentoPorcentaje == 0) {
+            $descuentoPorcentaje = ($descuentoMonto / $subtotal) * 100;
+        }
+        
+        // Calcular total final
+        $totalFinal = $subtotal - $descuentoMonto;
+        
+        // Si el frontend envió total_final, usarlo (puede tener diferencias por redondeo)
+        if ($request->has('total_final') && $request->total_final > 0) {
+            $totalFinal = $request->total_final;
+        }
+        
+        Log::info('Cálculos de descuento:', [
+            'subtotal' => $subtotal,
+            'descuento_porcentaje' => $descuentoPorcentaje,
+            'descuento_monto' => $descuentoMonto,
+            'total_final_calculado' => $totalFinal,
+            'monto_recibido' => $request->monto,
+            'monto_real_a_pagar' => $montoRealAPagar
+        ]);
+        
+        // ========== 4. VALIDAR QUE EL MONTO SEA CORRECTO ==========
+        // Si hay descuento en ESTE pago, el monto debe ser <= total_final
+        if ($descuentoMonto > 0 || $descuentoPorcentaje > 0) {
+            if (abs(floatval($request->monto) - $totalFinal) > 0.01) {
+                Log::warning('Posible error: El monto no coincide con el total final calculado', [
+                    'monto_recibido' => $request->monto,
+                    'total_final_calculado' => $totalFinal,
+                    'diferencia' => abs(floatval($request->monto) - $totalFinal)
+                ]);
+            }
+        }
+        
+        // ========== 5. VALIDACIÓN ESPECÍFICA PARA SEGUNDA CUOTA ==========
         if ($request->es_parcial && $request->numero_cuota == 2) {
             // Buscar la primera cuota
             $primeraCuota = Pago::where('inscripcion_id', $request->inscripcion_id)
@@ -76,28 +154,27 @@ public function store(Request $request)
                 ], 422);
             }
             
-            // ========== ¡¡¡CORRECCIÓN IMPORTANTE!!! ==========
             // Calcular el monto CORRECTO para la segunda cuota
             $montoPrimeraCuota = floatval($primeraCuota->monto);
-            $montoTotalInscripcion = floatval($inscripcion->monto_mensual); // O el campo correcto
             
-            // El monto de la segunda cuota DEBE SER: Total - PrimeraCuota
-            $montoEsperadoSegundaCuota = $montoTotalInscripcion - $montoPrimeraCuota;
+            // IMPORTANTE: Usar el montoRealAPagar que ya considera descuentos
+            $montoEsperadoSegundaCuota = $montoRealAPagar - $montoPrimeraCuota;
             
             Log::info('Validación segunda cuota:', [
-                'monto_total' => $montoTotalInscripcion,
+                'monto_real_a_pagar' => $montoRealAPagar,
                 'primera_cuota' => $montoPrimeraCuota,
                 'segunda_cuota_esperada' => $montoEsperadoSegundaCuota,
                 'segunda_cuota_recibida' => $request->monto
             ]);
             
             // Validar que el monto sea correcto
-            if (abs(floatval($request->monto) - $montoEsperadoSegundaCuota) > 0.01) {
+            $tolerancia = 0.01;
+            if (abs(floatval($request->monto) - $montoEsperadoSegundaCuota) > $tolerancia) {
                 return response()->json([
                     'success' => false,
                     'message' => "Monto incorrecto para segunda cuota. Debe ser: $".number_format($montoEsperadoSegundaCuota, 2) .
                                  ". Primera cuota: $".number_format($montoPrimeraCuota, 2) .
-                                 ". Total: $".number_format($montoTotalInscripcion, 2)
+                                 ". Total con descuento: $".number_format($montoRealAPagar, 2)
                 ], 422);
             }
             
@@ -124,7 +201,7 @@ public function store(Request $request)
             }
         }
         
-        // ========== 3. VALIDACIÓN PARA PRIMERA CUOTA ==========
+        // ========== 6. VALIDACIÓN PARA PRIMERA CUOTA ==========
         if ($request->es_parcial && $request->numero_cuota == 1) {
             // Verificar que no exista ya una primera cuota pagada
             $primeraCuotaExistente = Pago::where('inscripcion_id', $request->inscripcion_id)
@@ -140,8 +217,8 @@ public function store(Request $request)
                 ], 422);
             }
             
-            // Validar que la primera cuota no sea mayor al total
-            if (floatval($request->monto) >= floatval($inscripcion->monto_mensual)) {
+            // Validar que la primera cuota no sea mayor al total REAL (con descuento)
+            if (floatval($request->monto) >= $montoRealAPagar) {
                 return response()->json([
                     'success' => false,
                     'message' => 'Si el pago es igual o mayor al total, no marque como parcial. Marque como pago completo.'
@@ -149,36 +226,50 @@ public function store(Request $request)
             }
         }
         
-        // ========== 4. CALCULAR SALDO PENDIENTE ACTUAL ==========
+        // ========== 7. CALCULAR SALDO PENDIENTE ACTUAL ==========
         $totalPagado = $inscripcion->pagos()
             ->where('estado', 'pagado')
             ->sum('monto');
         
-        $saldoPendiente = max(0, $inscripcion->monto_mensual - $totalPagado);
+        // IMPORTANTE: Usar montoRealAPagar en lugar de monto_mensual
+        $saldoPendiente = max(0, $montoRealAPagar - $totalPagado);
         
         Log::info('Estado financiero actual:', [
-            'total_inscripcion' => $inscripcion->monto_mensual,
+            'monto_original' => $inscripcion->monto_mensual,
+            'monto_real_a_pagar' => $montoRealAPagar,
             'total_pagado' => $totalPagado,
             'saldo_pendiente' => $saldoPendiente,
-            'nuevo_pago' => $request->monto
+            'nuevo_pago' => $request->monto,
+            'tiene_descuento_este_pago' => $descuentoMonto > 0 || $descuentoPorcentaje > 0,
+            'tiene_descuento_existente' => $pagoConDescuentoExistente ? 'SI' : 'NO'
         ]);
         
-        // ========== 5. VALIDAR QUE NO SE PAGUE DE MÁS ==========
+        // ========== 8. VALIDAR QUE NO SE PAGUE DE MÁS ==========
         $nuevoTotalPagado = $totalPagado + floatval($request->monto);
         
-        if ($nuevoTotalPagado > $inscripcion->monto_mensual) {
+        // Usar montoRealAPagar que ya considera descuentos
+        if ($nuevoTotalPagado > $montoRealAPagar) {
             return response()->json([
                 'success' => false,
-                'message' => "No puede pagar más del total. Total: $".$inscripcion->monto_mensual.
-                             ", Ya pagado: $".$totalPagado.
-                             ", Máximo permitido: $".($inscripcion->monto_mensual - $totalPagado)
+                'message' => "No puede pagar más del total. " . 
+                             ($pagoConDescuentoExistente ? "Total con descuento" : "Total") . 
+                             ": $".number_format($montoRealAPagar, 2).
+                             ", Ya pagado: $".number_format($totalPagado, 2).
+                             ", Máximo permitido: $".number_format(($montoRealAPagar - $totalPagado), 2)
             ], 422);
         }
         
-        // ========== 6. PREPARAR DATOS DEL PAGO ==========
+        // ========== 9. PREPARAR DATOS COMPLETOS DEL PAGO ==========
         $pagoData = [
             'inscripcion_id' => $request->inscripcion_id,
             'monto' => $request->monto,
+            
+            // CAMPOS DE DESCUENTO
+            'descuento_porcentaje' => $descuentoPorcentaje,
+            'descuento_monto' => $descuentoMonto,
+            'subtotal' => $subtotal,
+            'total_final' => $totalFinal,
+            
             'metodo_pago' => $request->metodo_pago,
             'fecha_pago' => $request->fecha_pago,
             'fecha_vencimiento' => $request->fecha_vencimiento,
@@ -188,7 +279,7 @@ public function store(Request $request)
             'numero_cuota' => $request->numero_cuota ?? 1
         ];
         
-        // ========== 7. MANEJAR PAGO_GRUPO_ID ==========
+        // ========== 10. MANEJAR PAGO_GRUPO_ID ==========
         if ($request->filled('pago_grupo_id')) {
             $pagoData['pago_grupo_id'] = (string) $request->pago_grupo_id;
         } elseif ($request->es_parcial && $request->numero_cuota == 1) {
@@ -196,39 +287,71 @@ public function store(Request $request)
             $pagoData['pago_grupo_id'] = (string) (time() . rand(1000, 9999));
         }
         
-        // ========== 8. CREAR EL PAGO ==========
+        // ========== 11. AGREGAR INFO DE DESCUENTO A LA OBSERVACIÓN ==========
+        if ($descuentoMonto > 0 || $descuentoPorcentaje > 0) {
+            $observacionDescuento = "Descuento aplicado: ";
+            
+            if ($descuentoPorcentaje > 0) {
+                $observacionDescuento .= "{$descuentoPorcentaje}% (-$".number_format($descuentoMonto, 2).")";
+            } else {
+                $observacionDescuento .= "$".number_format($descuentoMonto, 2);
+            }
+            
+            $observacionDescuento .= ". Subtotal: $".number_format($subtotal, 2);
+            
+            $pagoData['observacion'] = ($pagoData['observacion'] ?? '') . " " . $observacionDescuento;
+            $pagoData['observacion'] = trim($pagoData['observacion']);
+            
+            // Si este es el PRIMER pago con descuento, actualizar montoRealAPagar para esta inscripción
+            if (!$pagoConDescuentoExistente) {
+                Log::info('Primer pago con descuento para inscripción #' . $inscripcion->id, [
+                    'nuevo_total_final' => $totalFinal,
+                    'monto_original' => $inscripcion->monto_mensual
+                ]);
+            }
+        }
+        
+        // ========== 12. CREAR EL PAGO ==========
         $pago = Pago::create($pagoData);
         
-        Log::info('Pago creado exitosamente:', $pago->toArray());
+        Log::info('Pago creado exitosamente:', [
+            'id' => $pago->id,
+            'monto' => $pago->monto,
+            'descuento_monto' => $pago->descuento_monto,
+            'descuento_porcentaje' => $pago->descuento_porcentaje,
+            'subtotal' => $pago->subtotal,
+            'total_final' => $pago->total_final,
+            'observacion' => $pago->observacion
+        ]);
         
-        // ========== 9. SI ES SEGUNDA CUOTA, ACTUALIZAR OBSERVACIÓN ==========
+        // ========== 13. SI ES SEGUNDA CUOTA, ACTUALIZAR OBSERVACIÓN ==========
         if ($request->es_parcial && $request->numero_cuota == 2) {
             $pago->observacion = "Segunda cuota pagada. " . ($pago->observacion ?? '');
             $pago->save();
-            
-            Log::info('Segunda cuota registrada:', [
-                'inscripcion_id' => $inscripcion->id,
-                'monto' => $pago->monto,
-                'total_pagado' => $nuevoTotalPagado,
-                'completado' => $nuevoTotalPagado >= $inscripcion->monto_mensual
-            ]);
         }
         
-        // ========== 10. ACTUALIZAR ESTADO DE LA INSCRIPCIÓN ==========
+        // ========== 14. ACTUALIZAR ESTADO DE LA INSCRIPCIÓN ==========
         $this->actualizarEstadoInscripcion($inscripcion->id);
         
-        // ========== 11. RESPONDER CON DATOS COMPLETOS ==========
+        // ========== 15. RESPONDER CON DATOS COMPLETOS ==========
         return response()->json([
             'success' => true,
             'message' => 'Pago registrado exitosamente',
             'data' => [
-                'pago' => $pago,
+                'pago' => $pago->refresh(), // Recargar con relaciones
                 'inscripcion' => $inscripcion->fresh(),
+                'descuento_aplicado' => [
+                    'porcentaje' => $descuentoPorcentaje,
+                    'monto' => $descuentoMonto,
+                    'subtotal' => $subtotal,
+                    'total_final' => $totalFinal
+                ],
                 'estado_financiero' => [
-                    'total_inscripcion' => $inscripcion->monto_mensual,
+                    'monto_original' => $inscripcion->monto_mensual,
+                    'monto_real_a_pagar' => $montoRealAPagar,
                     'total_pagado' => $nuevoTotalPagado,
-                    'saldo_pendiente' => max(0, $inscripcion->monto_mensual - $nuevoTotalPagado),
-                    'completado' => $nuevoTotalPagado >= $inscripcion->monto_mensual
+                    'saldo_pendiente' => max(0, $montoRealAPagar - $nuevoTotalPagado),
+                    'completado' => ($nuevoTotalPagado >= $montoRealAPagar)
                 ]
             ]
         ], 201);
@@ -257,69 +380,67 @@ public function store(Request $request)
     }
 }
 
-// Método para actualizar estado de inscripción
-// Método para actualizar estado de inscripción
 private function actualizarEstadoInscripcion($inscripcionId)
 {
     try {
-        $inscripcion = Inscripcion::with('pagos')->find($inscripcionId);
+        $inscripcion = Inscripcion::with(['pagos' => function($query) {
+            $query->where('estado', 'pagado')
+                  ->orderBy('created_at', 'desc');
+        }])->find($inscripcionId);
         
         if (!$inscripcion) return;
         
-        // Calcular total pagado
-        $totalPagado = $inscripcion->pagos()
-            ->where('estado', 'pagado')
-            ->sum('monto');
+        // ========== 1. CALCULAR MONTO REAL A PAGAR ==========
+        $montoRealAPagar = $inscripcion->monto_mensual;
         
-        $montoTotal = $inscripcion->monto_mensual;
-        $saldoPendiente = max(0, $montoTotal - $totalPagado);
+        // Buscar pagos que indiquen "PAGO COMPLETO" en la observación
+        $pagoCompleto = $inscripcion->pagos
+            ->first(function($pago) {
+                return stripos($pago->observacion, 'pago completo') !== false ||
+                       stripos($pago->observacion, 'completamente pagado') !== false;
+            });
         
-        Log::info('Actualizando estado inscripción:', [
-            'id' => $inscripcionId,
-            'total_pagado' => $totalPagado,
-            'monto_total' => $montoTotal,
-            'saldo_pendiente' => $saldoPendiente
-        ]);
-        
-        // Determinar nuevo estado
-        $nuevoEstado = $inscripcion->estado;
-        
-        if ($saldoPendiente <= 0) {
-            // Completamente pagado
-            $nuevoEstado = 'activo';
-            Log::info('Inscripción completamente pagada, estado: activo');
-        } else {
-            // Hay saldo pendiente
-            // Verificar si hay pagos vencidos
-            $pagosVencidos = $inscripcion->pagos()
-                ->where('estado', 'pendiente')
-                ->where('fecha_vencimiento', '<', now())
-                ->exists();
-            
-            if ($pagosVencidos) {
-                $nuevoEstado = 'en_mora';
-                Log::info('Hay pagos vencidos, estado: en_mora');
-            } elseif ($inscripcion->estado === 'activo' && $saldoPendiente > 0) {
-                // Si estaba activa pero ahora tiene saldo
-                $nuevoEstado = 'en_mora';
-                Log::info('Saldo pendiente detectado, estado: en_mora');
-            }
-        }
-        
-        // Actualizar si cambió
-        if ($nuevoEstado !== $inscripcion->estado) {
-            $inscripcion->estado = $nuevoEstado;
-            $inscripcion->save();
-            
-            Log::info('Estado de inscripción actualizado:', [
-                'id' => $inscripcionId,
-                'estado_anterior' => $inscripcion->getOriginal('estado'),
-                'estado_nuevo' => $nuevoEstado
+        if ($pagoCompleto) {
+            // Si hay un pago marcado como completo, usar ESE monto como total
+            $montoRealAPagar = $pagoCompleto->monto;
+            Log::info('Encontrado pago completo:', [
+                'pago_id' => $pagoCompleto->id,
+                'observacion' => $pagoCompleto->observacion,
+                'monto' => $pagoCompleto->monto
             ]);
         }
         
+        // ========== 2. CALCULAR TOTAL PAGADO ==========
+        $totalPagado = $inscripcion->pagos->sum('monto');
+        $saldoPendiente = max(0, $montoRealAPagar - $totalPagado);
+        
+        // ========== 3. DETERMINAR ESTADO ==========
+        $nuevoEstado = 'activo';
+        
+        // Si hay un pago marcado como "COMPLETO" y se pagó ese monto exacto
+        if ($pagoCompleto && abs($totalPagado - $montoRealAPagar) <= 0.01) {
+            $nuevoEstado = 'activo';
+            Log::info('Inscripción completamente pagada (con descuento)');
+        }
+        // Si no hay pago completo marcado pero se pagó el monto original
+        elseif (!$pagoCompleto && $totalPagado >= $inscripcion->monto_mensual) {
+            $nuevoEstado = 'activo';
+            Log::info('Inscripción completamente pagada (sin descuento)');
+        }
+        // Si hay saldo pendiente
+        elseif ($saldoPendiente > 0.01) {
+            $nuevoEstado = 'en_mora';
+            Log::info('Saldo pendiente: ' . $saldoPendiente);
+        }
+        
+        // ========== 4. ACTUALIZAR ==========
+        if ($nuevoEstado !== $inscripcion->estado) {
+            $inscripcion->estado = $nuevoEstado;
+            $inscripcion->save();
+        }
+        
     } catch (\Exception $e) {
-        Log::error('Error actualizando estado de inscripción: ' . $e->getMessage());
+        Log::error('Error actualizando estado: ' . $e->getMessage());
     }
 }
 

@@ -91,112 +91,53 @@ public function store(Request $request)
             'estudiante_id' => 'required|exists:estudiantes,id',
             'modalidad_id' => 'required|exists:modalidades,id',
             'fecha_inicio' => 'required|date',
+            'fecha_fin' => 'required|date',
             'horarios' => 'required|array',
-            'distribucion_horarios' => 'sometimes|array',
+            'distribucion_horarios' => 'required|array', // ← CAMBIADO A REQUERIDO
             'distribucion_horarios.*.horario_id' => 'required|exists:horarios,id',
             'distribucion_horarios.*.clases_totales' => 'required|integer|min:1',
-            'estado' => 'nullable|in:activo,suspendido,en_mora,vencido,finalizado,renovado',
-            // NUEVO: Campos para detectar pago parcial
-            'es_pago_parcial' => 'nullable|boolean',
-            'monto_pago_inicial' => 'nullable|numeric|min:0',
-            'monto_total' => 'nullable|numeric|min:0'
         ]);
         
-        \Log::info('🔄 Iniciando creación de inscripción', [
+        \Log::info('🔄 Iniciando creación de inscripción con distribución REAL', [
             'estudiante_id' => $request->estudiante_id,
             'modalidad_id' => $request->modalidad_id,
-            'estado_solicitado' => $request->estado ?? 'activo',
+            'fecha_inicio' => $request->fecha_inicio,
+            'fecha_fin' => $request->fecha_fin,
             'horarios_count' => count($request->horarios),
-            'es_pago_parcial' => $request->es_pago_parcial ?? false,
-            'monto_pago_inicial' => $request->monto_pago_inicial ?? null,
-            'monto_total' => $request->monto_total ?? null
+            'distribucion_count' => count($request->distribucion_horarios)
         ]);
         
-        // ========== VALIDACIÓN 1: Verificar inscripción activa en misma modalidad ==========
-        $inscripcionActivaExistente = DB::table('inscripciones')
-            ->where('estudiante_id', $request->estudiante_id)
-            ->where('modalidad_id', $request->modalidad_id)
-            ->whereIn('estado', ['activo', 'en_mora'])
-            ->first();
+        // ========== VALIDAR QUE DISTRIBUCIÓN COINCIDA CON HORARIOS ==========
+        \Log::info('🔍 Validando distribución recibida:', $request->distribucion_horarios);
         
-        if ($inscripcionActivaExistente) {
+        $horariosDistribucion = collect($request->distribucion_horarios)->pluck('horario_id')->toArray();
+        $horariosRequest = $request->horarios;
+        
+        sort($horariosDistribucion);
+        sort($horariosRequest);
+        
+        \Log::info('📊 Horarios distribución:', $horariosDistribucion);
+        \Log::info('📊 Horarios request:', $horariosRequest);
+        
+        if ($horariosDistribucion != $horariosRequest) {
+            \Log::error('❌ Los horarios en la distribución no coinciden');
             return response()->json([
                 'success' => false,
-                'message' => 'El estudiante ya tiene una inscripción activa o en mora en esta modalidad',
-                'inscripcion_existente_id' => $inscripcionActivaExistente->id,
-                'estado_existente' => $inscripcionActivaExistente->estado
-            ], 409);
+                'message' => 'Los horarios en la distribución no coinciden con los horarios seleccionados'
+            ], 422);
         }
         
-        // ========== VALIDACIÓN 2: Verificar conflictos de horarios ==========
-        $conflictosHorarios = [];
-        foreach ($request->horarios as $horarioId) {
-            $horarioExistente = DB::table('inscripcion_horarios as ih')
-                ->join('inscripciones as i', 'ih.inscripcion_id', '=', 'i.id')
-                ->where('i.estudiante_id', $request->estudiante_id)
-                ->whereIn('i.estado', ['activo', 'en_mora'])
-                ->where('ih.horario_id', $horarioId)
-                ->select('ih.id', 'i.id as inscripcion_id', 'i.estado')
-                ->first();
-            
-            if ($horarioExistente) {
-                $horarioInfo = DB::table('horarios')
-                    ->where('id', $horarioId)
-                    ->select('dia_semana', 'hora_inicio', 'hora_fin', 'nombre')
-                    ->first();
-                
-                $conflictosHorarios[] = [
-                    'horario_id' => $horarioId,
-                    'dia_semana' => $horarioInfo->dia_semana ?? '',
-                    'hora_inicio' => $horarioInfo->hora_inicio ?? '',
-                    'hora_fin' => $horarioInfo->hora_fin ?? '',
-                    'nombre_horario' => $horarioInfo->nombre ?? '',
-                    'inscripcion_existente_id' => $horarioExistente->inscripcion_id,
-                    'estado_existente' => $horarioExistente->estado
-                ];
-            }
-        }
+        // ========== CALCULAR CLASES TOTALES REALES ==========
+        // ¡USAR LA SUMA DIRECTA DE LA DISTRIBUCIÓN!
+        $clasesTotalesReales = collect($request->distribucion_horarios)->sum('clases_totales');
         
-        if (!empty($conflictosHorarios)) {
+        \Log::info("📊 Clases totales REALES calculadas desde distribución: {$clasesTotalesReales}");
+        
+        // ========== VERIFICAR QUE SEA AL MENOS 1 ==========
+        if ($clasesTotalesReales < 1) {
             return response()->json([
                 'success' => false,
-                'message' => 'El estudiante ya está inscrito en algunos de los horarios seleccionados',
-                'conflictos' => $conflictosHorarios
-            ], 409);
-        }
-        
-        // ========== VALIDACIÓN 3: Verificar cupo disponible ==========
-        $horariosSinCupo = [];
-        foreach ($request->horarios as $horarioId) {
-            $horario = DB::table('horarios')
-                ->where('id', $horarioId)
-                ->select('id', 'cupo_maximo', 'cupo_actual', 'dia_semana', 'hora_inicio', 'nombre')
-                ->first();
-            
-            if (!$horario) {
-                return response()->json([
-                    'success' => false,
-                    'message' => "El horario ID {$horarioId} no existe"
-                ], 404);
-            }
-            
-            if ($horario->cupo_actual >= $horario->cupo_maximo) {
-                $horariosSinCupo[] = [
-                    'horario_id' => $horario->id,
-                    'dia_semana' => $horario->dia_semana,
-                    'hora_inicio' => $horario->hora_inicio,
-                    'nombre_horario' => $horario->nombre,
-                    'cupo_actual' => $horario->cupo_actual,
-                    'cupo_maximo' => $horario->cupo_maximo
-                ];
-            }
-        }
-        
-        if (!empty($horariosSinCupo)) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Algunos horarios seleccionados ya están llenos',
-                'horarios_llenos' => $horariosSinCupo
+                'message' => 'Debe haber al menos 1 clase por horario'
             ], 422);
         }
         
@@ -212,30 +153,13 @@ public function store(Request $request)
             ], 404);
         }
         
-        $clasesMensuales = $modalidad->clases_mensuales ?? 12;
         $permisosMaximos = $modalidad->permisos_maximos ?? 3;
         $precioMensual = $modalidad->precio_mensual ?? 0;
         $montoMensual = $request->monto_mensual ?? $precioMensual;
         
-        // ========== OBTENER SUCURSAL Y ENTRENADOR ==========
-        if (!$request->has('sucursal_id') || !$request->has('entrenador_id')) {
-            $primerHorario = DB::table('horarios')
-                ->where('id', $request->horarios[0])
-                ->select('sucursal_id', 'entrenador_id')
-                ->first();
-            
-            $sucursalId = $request->sucursal_id ?? ($primerHorario->sucursal_id ?? null);
-            $entrenadorId = $request->entrenador_id ?? ($primerHorario->entrenador_id ?? null);
-        } else {
-            $sucursalId = $request->sucursal_id;
-            $entrenadorId = $request->entrenador_id;
-        }
-        
-        // ========== CALCULAR FECHAS Y DURACIÓN ==========
+        // ========== CALCULAR FECHAS ==========
         $fechaInicio = Carbon::parse($request->fecha_inicio);
-        $fechaFin = $request->fecha_fin 
-            ? Carbon::parse($request->fecha_fin)
-            : $fechaInicio->copy()->addMonth();
+        $fechaFin = Carbon::parse($request->fecha_fin);
         
         if ($fechaFin <= $fechaInicio) {
             return response()->json([
@@ -247,311 +171,109 @@ public function store(Request $request)
         $mesesDuracion = $fechaInicio->floatDiffInMonths($fechaFin);
         \Log::info("📅 Período: {$fechaInicio->format('Y-m-d')} al {$fechaFin->format('Y-m-d')} ({$mesesDuracion} meses)");
         
-        // ========== CALCULAR CLASES TOTALES REALES ==========
-        $clasesTotalesReales = 0;
-        
-        if ($request->has('distribucion_horarios') && is_array($request->distribucion_horarios)) {
-            \Log::info('📥 Distribución recibida desde frontend:', $request->distribucion_horarios);
-            
-            // Verificar que coincidan los IDs de horarios
-            $horariosDistribucion = collect($request->distribucion_horarios)->pluck('horario_id')->toArray();
-            $horariosRequest = $request->horarios;
-            
-            sort($horariosDistribucion);
-            sort($horariosRequest);
-            
-            if ($horariosDistribucion != $horariosRequest) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Los horarios en la distribución no coinciden con los horarios seleccionados'
-                ], 422);
-            }
-            
-            // Sumar clases totales REALES de la distribución
-            $clasesTotalesReales = collect($request->distribucion_horarios)->sum('clases_totales');
-            \Log::info("📊 Clases totales REALES calculadas: {$clasesTotalesReales}");
-        } else {
-            $clasesTotalesReales = ceil($clasesMensuales * max(1, $mesesDuracion));
-            \Log::info("📊 Clases totales por modalidad: {$clasesTotalesReales}");
-        }
-        
-        $clasesTotalesReales = max(1, $clasesTotalesReales);
-        
-        // ========== DETERMINAR ESTADO FINAL - CORREGIDO ==========
-        // Lógica mejorada para determinar el estado inicial
-        $estadoFinal = $request->estado ?? 'activo'; // Por defecto
-        
-        // Detectar automáticamente si es pago parcial
-        $esPagoParcial = false;
-        $observaciones = $request->observaciones ?? null;
-        
-        // Opción 1: Si viene explícitamente indicado desde el frontend
-        if ($request->has('es_pago_parcial') && $request->es_pago_parcial == true) {
-            $esPagoParcial = true;
+        // ========== DETERMINAR ESTADO ==========
+        $estadoFinal = $request->estado ?? 'activo';
+        if ($request->es_pago_parcial ?? false) {
             $estadoFinal = 'en_mora';
-            $observaciones = 'Inscripción creada con estado EN MORA por pago parcial/dividido. ' . ($observaciones ?? '');
-            \Log::warning("⚠️ Pago parcial detectado explícitamente → Estado: EN MORA");
         }
-        // Opción 2: Si detectamos pago parcial por los montos
-        elseif ($request->has('monto_pago_inicial') && $request->has('monto_total') 
-                && $request->monto_pago_inicial > 0 
-                && $request->monto_total > 0 
-                && $request->monto_pago_inicial < $request->monto_total) {
-            $esPagoParcial = true;
-            $estadoFinal = 'en_mora';
-            $observaciones = 'Inscripción creada con estado EN MORA por pago parcial/dividido. ' . ($observaciones ?? '');
-            \Log::warning("⚠️ Pago parcial detectado por montos → Estado: EN MORA");
-        }
-        // Opción 3: Si el estado viene como 'en_mora' explícitamente
-        elseif ($estadoFinal === 'en_mora') {
-            $esPagoParcial = true;
-            $observaciones = 'Inscripción creada con estado EN MORA por pago parcial/dividido. ' . ($observaciones ?? '');
-            \Log::warning("⚠️ Estado EN MORA recibido explícitamente");
-        }
-        
-        \Log::info("🎯 Estado final de inscripción: {$estadoFinal}", [
-            'es_pago_parcial' => $esPagoParcial,
-            'monto_pago_inicial' => $request->monto_pago_inicial ?? null,
-            'monto_total' => $request->monto_total ?? null
-        ]);
         
         // ========== CREAR LA INSCRIPCIÓN ==========
         $inscripcionId = DB::table('inscripciones')->insertGetId([
             'estudiante_id' => $request->estudiante_id,
             'modalidad_id' => $request->modalidad_id,
-            'sucursal_id' => $sucursalId,
-            'entrenador_id' => $entrenadorId,
+            'sucursal_id' => $request->sucursal_id ?? null,
+            'entrenador_id' => $request->entrenador_id ?? null,
             'fecha_inicio' => $fechaInicio,
             'fecha_fin' => $fechaFin,
-            'clases_totales' => $clasesTotalesReales,
+            'clases_totales' => $clasesTotalesReales, // ← ¡20 debería venir del frontend!
             'clases_asistidas' => 0,
             'permisos_usados' => 0,
             'permisos_disponibles' => $permisosMaximos,
             'monto_mensual' => $montoMensual,
             'estado' => $estadoFinal,
-            'observaciones' => $observaciones,
+            'observaciones' => $request->observaciones,
             'created_at' => now(),
             'updated_at' => now()
         ]);
         
-        \Log::info("✅ Inscripción creada con ID: {$inscripcionId}, Estado: {$estadoFinal}");
+        \Log::info("✅ Inscripción creada con ID: {$inscripcionId}, Clases: {$clasesTotalesReales}");
         
         // ========== DISTRIBUIR CLASES ENTRE HORARIOS ==========
         $totalClasesGeneradas = 0;
-        $inscripcionHorariosIds = [];
         
-        // Si tenemos distribución del frontend, usar esa (MODO AVANZADO)
-        if ($request->has('distribucion_horarios') && is_array($request->distribucion_horarios)) {
-            \Log::info('🎯 Usando distribución avanzada desde frontend');
+        foreach ($request->distribucion_horarios as $distribucion) {
+            $horarioId = $distribucion['horario_id'];
+            $clasesParaEsteHorario = $distribucion['clases_totales'];
             
-            foreach ($request->distribucion_horarios as $distribucion) {
-                $horarioId = $distribucion['horario_id'];
-                $clasesParaEsteHorario = $distribucion['clases_totales'];
-                
-                // Obtener información del horario
-                $horario = DB::table('horarios')
-                    ->where('id', $horarioId)
-                    ->select('id', 'dia_semana', 'hora_inicio', 'hora_fin', 'nombre', 'cupo_maximo', 'cupo_actual')
-                    ->first();
-                
-                if (!$horario) {
-                    \Log::warning("⚠️ Horario ID {$horarioId} no encontrado");
-                    continue;
-                }
-                
-                // 1. CREAR INSCRIPCION_HORARIO
-                $inscripcionHorarioId = DB::table('inscripcion_horarios')->insertGetId([
-                    'inscripcion_id' => $inscripcionId,
-                    'horario_id' => $horarioId,
-                    'clases_totales' => $clasesParaEsteHorario,
-                    'clases_asistidas' => 0,
-                    'clases_restantes' => $clasesParaEsteHorario,
-                    'permisos_usados' => 0,
-                    'fecha_inicio' => $fechaInicio,
-                    'fecha_fin' => $fechaFin,
-                    'estado' => 'activo',
-                    'created_at' => now(),
-                    'updated_at' => now()
-                ]);
-                
-                $inscripcionHorariosIds[$horarioId] = $inscripcionHorarioId;
-                
-                // 2. GENERAR CLASES PROGRAMADAS usando la función optimizada
-                \Log::info("📅 Procesando horario: {$horario->nombre} ({$horario->dia_semana}) - {$clasesParaEsteHorario} clases");
-                
-                $clasesGeneradasParaEsteHorario = $this->generarClasesParaHorario(
-                    $inscripcionId,
-                    $inscripcionHorarioId,
-                    $horario,
-                    $request->estudiante_id,
-                    $fechaInicio->format('Y-m-d'),
-                    $fechaFin->format('Y-m-d'),
-                    $clasesParaEsteHorario
-                );
-                
-                $totalClasesGeneradas += $clasesGeneradasParaEsteHorario;
-                
-                // 3. ACTUALIZAR CUPO DEL HORARIO
-                DB::table('horarios')
-                    ->where('id', $horarioId)
-                    ->increment('cupo_actual');
-                
-                \Log::info("🎯 Total generado para horario {$horario->nombre}: {$clasesGeneradasParaEsteHorario}/{$clasesParaEsteHorario}");
+            \Log::info("📅 Procesando horario ID {$horarioId}: {$clasesParaEsteHorario} clases");
+            
+            // Obtener información del horario
+            $horario = DB::table('horarios')
+                ->where('id', $horarioId)
+                ->first();
+            
+            if (!$horario) {
+                \Log::warning("⚠️ Horario ID {$horarioId} no encontrado");
+                continue;
             }
-        } else {
-            // MODO COMPATIBILIDAD: Distribución equitativa
-            \Log::info('🔄 Usando distribución equitativa (modo compatibilidad)');
             
-            $totalHorarios = count($request->horarios);
-            $clasesPorHorario = floor($clasesTotalesReales / $totalHorarios);
-            $clasesExtra = $clasesTotalesReales % $totalHorarios;
+            // Crear inscripcion_horario
+            $inscripcionHorarioId = DB::table('inscripcion_horarios')->insertGetId([
+                'inscripcion_id' => $inscripcionId,
+                'horario_id' => $horarioId,
+                'clases_totales' => $clasesParaEsteHorario,
+                'clases_asistidas' => 0,
+                'clases_restantes' => $clasesParaEsteHorario,
+                'permisos_usados' => 0,
+                'fecha_inicio' => $fechaInicio,
+                'fecha_fin' => $fechaFin,
+                'estado' => 'activo',
+                'created_at' => now(),
+                'updated_at' => now()
+            ]);
             
-            foreach ($request->horarios as $index => $horarioId) {
-                $clasesParaEsteHorario = $clasesPorHorario;
-                if ($index < $clasesExtra) {
-                    $clasesParaEsteHorario += 1;
-                }
-                
-                // Obtener información del horario
-                $horario = DB::table('horarios')
-                    ->where('id', $horarioId)
-                    ->select('id', 'dia_semana', 'hora_inicio', 'hora_fin', 'nombre', 'cupo_maximo', 'cupo_actual')
-                    ->first();
-                
-                if (!$horario) {
-                    \Log::warning("⚠️ Horario ID {$horarioId} no encontrado");
-                    continue;
-                }
-                
-                // 1. CREAR INSCRIPCION_HORARIO
-                $inscripcionHorarioId = DB::table('inscripcion_horarios')->insertGetId([
-                    'inscripcion_id' => $inscripcionId,
-                    'horario_id' => $horarioId,
-                    'clases_totales' => $clasesParaEsteHorario,
-                    'clases_asistidas' => 0,
-                    'clases_restantes' => $clasesParaEsteHorario,
-                    'permisos_usados' => 0,
-                    'fecha_inicio' => $fechaInicio,
-                    'fecha_fin' => $fechaFin,
-                    'estado' => 'activo',
-                    'created_at' => now(),
-                    'updated_at' => now()
-                ]);
-                
-                // 2. GENERAR CLASES PROGRAMADAS usando la función optimizada
-                $clasesGeneradasParaEsteHorario = $this->generarClasesParaHorario(
-                    $inscripcionId,
-                    $inscripcionHorarioId,
-                    $horario,
-                    $request->estudiante_id,
-                    $fechaInicio->format('Y-m-d'),
-                    $fechaFin->format('Y-m-d'),
-                    $clasesParaEsteHorario
-                );
-                
-                $totalClasesGeneradas += $clasesGeneradasParaEsteHorario;
-                
-                // 3. ACTUALIZAR CUPO DEL HORARIO
-                DB::table('horarios')
-                    ->where('id', $horarioId)
-                    ->increment('cupo_actual');
-                
-                \Log::info("📊 Horario {$horario->nombre}: {$clasesGeneradasParaEsteHorario} clases generadas");
-            }
+            // Generar clases programadas
+            $clasesGeneradasParaEsteHorario = $this->generarClasesParaHorario(
+                $inscripcionId,
+                $inscripcionHorarioId,
+                $horario,
+                $request->estudiante_id,
+                $fechaInicio->format('Y-m-d'),
+                $fechaFin->format('Y-m-d'),
+                $clasesParaEsteHorario
+            );
+            
+            $totalClasesGeneradas += $clasesGeneradasParaEsteHorario;
+            
+            // Actualizar cupo del horario
+            DB::table('horarios')
+                ->where('id', $horarioId)
+                ->increment('cupo_actual');
         }
-        
-        // ========== INFORMACIÓN ADICIONAL PARA EL FRONTEND ==========
-        $infoPagoParcial = null;
-        if ($esPagoParcial) {
-            $infoPagoParcial = [
-                'es_pago_parcial' => true,
-                'estado_inicial' => 'en_mora',
-                'observaciones' => 'La inscripción se creó en estado EN MORA. Cambiará a ACTIVO cuando complete el pago total.',
-                'monto_pagado' => $request->monto_pago_inicial ?? 0,
-                'monto_pendiente' => $montoMensual - ($request->monto_pago_inicial ?? 0)
-            ];
-        }
-        
-        // ========== OBTENER INFORMACIÓN COMPLETA PARA LA RESPUESTA ==========
-        $inscripcionCreada = DB::table('inscripciones')
-            ->where('id', $inscripcionId)
-            ->first();
-        
-        $horariosAsignados = DB::table('inscripcion_horarios as ih')
-            ->join('horarios as h', 'ih.horario_id', '=', 'h.id')
-            ->where('ih.inscripcion_id', $inscripcionId)
-            ->select(
-                'h.id',
-                'h.nombre',
-                'h.dia_semana', 
-                'h.hora_inicio',
-                'h.hora_fin',
-                'ih.clases_totales',
-                'ih.clases_asistidas',
-                'ih.clases_restantes'
-            )
-            ->get();
         
         DB::commit();
         
-        \Log::info("🎉 Inscripción #{$inscripcionId} completada exitosamente", [
-            'estado' => $estadoFinal,
-            'clases_totales' => $clasesTotalesReales,
-            'clases_generadas' => $totalClasesGeneradas,
-            'horarios_asignados' => $horariosAsignados->count(),
-            'es_pago_parcial' => $esPagoParcial
+        \Log::info("🎉 Inscripción #{$inscripcionId} completada", [
+            'clases_totales_registradas' => $clasesTotalesReales,
+            'clases_generadas' => $totalClasesGeneradas
         ]);
         
-        // ========== RESPUESTA EXITOSA ==========
         return response()->json([
             'success' => true,
             'inscripcion_id' => $inscripcionId,
-            'message' => $esPagoParcial 
-                ? 'Inscripción creada exitosamente en estado EN MORA (pago parcial)' 
-                : 'Inscripción creada exitosamente con clases REALES programadas',
+            'message' => 'Inscripción creada exitosamente con clases REALES',
             'data' => [
-                'inscripcion' => $inscripcionCreada,
-                'horarios' => $horariosAsignados,
-                'clases_totales_reales' => $clasesTotalesReales,
-                'clases_generadas' => $totalClasesGeneradas,
-                'clases_modalidad' => $clasesMensuales,
-                'meses_duracion' => round($mesesDuracion, 2),
-                'distribucion_por_horario' => $request->distribucion_horarios ?? null,
-                'estado_creado' => $estadoFinal,
-                'info_pago_parcial' => $infoPagoParcial
+                'clases_totales' => $clasesTotalesReales,
+                'clases_generadas' => $totalClasesGeneradas
             ]
         ]);
         
     } catch (\Exception $e) {
         DB::rollBack();
-        
-        // Revertir incrementos de cupo si hubo error
-        if (isset($request->horarios) && is_array($request->horarios)) {
-            foreach ($request->horarios as $horarioId) {
-                try {
-                    DB::table('horarios')
-                        ->where('id', $horarioId)
-                        ->where('cupo_actual', '>', 0)
-                        ->decrement('cupo_actual');
-                } catch (\Exception $e2) {
-                    \Log::warning("No se pudo revertir cupo para horario {$horarioId}: " . $e2->getMessage());
-                }
-            }
-        }
-        
-        \Log::error('❌ Error al crear inscripción: ' . $e->getMessage(), [
-            'trace' => $e->getTraceAsString(),
-            'request' => $request->all()
-        ]);
-        
+        \Log::error('❌ Error: ' . $e->getMessage());
         return response()->json([
             'success' => false,
-            'message' => 'Error al crear la inscripción: ' . $e->getMessage(),
-            'error_details' => env('APP_DEBUG') ? [
-                'message' => $e->getMessage(),
-                'file' => $e->getFile(),
-                'line' => $e->getLine()
-            ] : null
+            'message' => 'Error: ' . $e->getMessage()
         ], 500);
     }
 }
@@ -669,76 +391,64 @@ public function estadisticasInscripcion($id)
  */
 private function generarClasesParaHorario($inscripcionId, $inscripcionHorarioId, $horario, $estudianteId, $fechaInicio, $fechaFin, $clasesAGenerar)
 {
+    \Log::info("📅 Generando clases para horario {$horario->id} ({$horario->dia_semana})");
+    \Log::info("  Período: {$fechaInicio} al {$fechaFin}");
+    \Log::info("  Clases a generar: {$clasesAGenerar}");
+    
+    // MAPEO CORREGIDO (Carbon usa 1-7, 7=Domingo)
     $diasMap = [
-        'lunes' => 1, 'martes' => 2, 'miércoles' => 3,
+        'lunes' => 1, 'martes' => 2, 'miércoles' => 3, 'miercoles' => 3,
         'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'sabado' => 6,
-        'domingo' => 0
+        'domingo' => 7  // ¡IMPORTANTE! 7 no 0
     ];
     
-    $diaHorario = strtolower($horario->dia_semana);
+    $diaHorario = strtolower(trim($horario->dia_semana));
     $diaNumero = $diasMap[$diaHorario] ?? 1;
     
-    $fechaActual = Carbon::parse($fechaInicio);
-    $fechaFinObj = Carbon::parse($fechaFin);
+    // Calcular días coincidentes
+    $inicio = Carbon::parse($fechaInicio);
+    $fin = Carbon::parse($fechaFin);
     
-    $clasesGeneradas = 0;
+    $diasCoincidentes = [];
+    $fechaActual = $inicio->copy();
     
-    \Log::info("📅 Generando {$clasesAGenerar} clases para {$horario->nombre} ({$horario->dia_semana})");
-    \Log::info("  Período: {$fechaActual->format('Y-m-d')} al {$fechaFinObj->format('Y-m-d')}");
-    \Log::info("  Día PHP a buscar: {$diaNumero} (0=domingo, 1=lunes, etc.)");
-    
-    // Primero: recolectar todos los días que coinciden
-    $diasDisponibles = [];
-    
-    while ($fechaActual <= $fechaFinObj) {
+    while ($fechaActual <= $fin) { // <= para incluir fecha final
         if ($fechaActual->dayOfWeek == $diaNumero) {
-            $diasDisponibles[] = $fechaActual->format('Y-m-d');
+            $diasCoincidentes[] = $fechaActual->format('Y-m-d');
         }
         $fechaActual->addDay();
     }
     
-    \Log::info("  Días disponibles que coinciden: " . count($diasDisponibles));
+    \Log::info("  Días coincidentes encontrados: " . count($diasCoincidentes));
     
-    // Si no hay suficientes días, usar todos los disponibles
-    if (count($diasDisponibles) < $clasesAGenerar) {
-        \Log::warning("⚠️ No hay suficientes días en el período. Disponibles: " . count($diasDisponibles) . ", Necesarios: {$clasesAGenerar}");
-        $clasesAGenerar = count($diasDisponibles);
-    }
+    // Limitar a las clases solicitadas
+    $diasAGenerar = array_slice($diasCoincidentes, 0, $clasesAGenerar);
     
-    // Tomar solo los primeros N días según las clases a generar
-    $diasAGenerar = array_slice($diasDisponibles, 0, $clasesAGenerar);
-    
-    \Log::info("  Días seleccionados para generar: " . implode(', ', $diasAGenerar));
-    
-    // Generar clases para esos días
-    foreach ($diasAGenerar as $fechaStr) {
+    // Generar clases
+    $clasesGeneradas = 0;
+    foreach ($diasAGenerar as $fecha) {
         try {
             DB::table('clases_programadas')->insert([
                 'inscripcion_id' => $inscripcionId,
                 'inscripcion_horario_id' => $inscripcionHorarioId,
                 'estudiante_id' => $estudianteId,
                 'horario_id' => $horario->id,
-                'fecha' => $fechaStr,
+                'fecha' => $fecha,
                 'hora_inicio' => $horario->hora_inicio,
                 'hora_fin' => $horario->hora_fin,
                 'estado_clase' => 'programada',
-                'cuenta_para_asistencia' => true,
-                'es_recuperacion' => false,
-                'observaciones' => 'Generada automáticamente',
                 'created_at' => now(),
                 'updated_at' => now()
             ]);
-            
             $clasesGeneradas++;
-            \Log::info("    ✅ {$fechaStr} - {$horario->hora_inicio}");
         } catch (\Exception $e) {
-            \Log::warning("    ⚠️ Error generando clase para {$fechaStr}: " . $e->getMessage());
+            \Log::error("Error generando clase: " . $e->getMessage());
         }
     }
     
+    \Log::info("  Clases generadas: {$clasesGeneradas}");
     return $clasesGeneradas;
 }
-
 // Función mejorada para generar clases
 
 
@@ -933,7 +643,7 @@ public function show($id)
         'horarios.disciplina', 
         'horarios.entrenador',
         'horarios.sucursal',
-        'inscripcionHorarios' // Asegúrate de cargar esto también
+        'inscripcionHorarios.horario' // ¡IMPORTANTE! Cargar la relación horario
     ])->findOrFail($id);
     
     // Accede a los datos de inscripcion_horarios
@@ -1011,7 +721,7 @@ public function show($id)
         }
     }
 
-  public function renovar($id, Request $request)
+public function renovar($id, Request $request)
 {
     DB::beginTransaction();
     
@@ -1032,13 +742,19 @@ public function show($id)
             ], 400);
         }
         
-        // 3. Validar datos de entrada
+        // 3. Validar datos de entrada CON TODOS LOS CAMPOS NECESARIOS
         $request->validate([
             'fecha_inicio' => 'required|date',
             'fecha_fin' => 'required|date|after:fecha_inicio',
             'motivo' => 'nullable|string|max:500',
-            'metodo_pago' => 'nullable|in:efectivo,tarjeta,transferencia,qr',
-            'monto_pago' => 'nullable|numeric|min:0'
+            'metodo_pago' => 'required|in:efectivo,tarjeta,transferencia,qr',
+            'monto_pago' => 'required|numeric|min:0',
+            
+            // CAMPOS DE DESCUENTO (NUEVOS)
+            'descuento_porcentaje' => 'nullable|numeric|min:0|max:100',
+            'descuento_monto' => 'nullable|numeric|min:0',
+            'subtotal' => 'required|numeric|min:0',
+            'total_final' => 'required|numeric|min:0'
         ]);
         
         // 4. Calcular fechas
@@ -1108,14 +824,13 @@ public function show($id)
             Log::info("📅 Horario copiado: {$inscripcionHorario->horario->nombre} - {$clasesParaEsteHorario} clases");
             
             // 7. GENERAR NUEVAS CLASES PROGRAMADAS para la NUEVA inscripción
-            $clasesGeneradasParaEsteHorario = $this->generarClasesParaHorario(
+            $clasesGeneradasParaEsteHorario = $this->generarClasesParaHorarioRenovacion(
                 $nuevaInscripcion->id,
                 $nuevoInscripcionHorario->id,
                 $inscripcionHorario->horario,
                 $inscripcionActual->estudiante_id,
                 $fechaInicio->format('Y-m-d'),
-                $fechaFin->format('Y-m-d'),
-                $clasesParaEsteHorario
+                $fechaFin->format('Y-m-d')
             );
             
             $totalClasesGeneradas += $clasesGeneradasParaEsteHorario;
@@ -1132,25 +847,73 @@ public function show($id)
             'clases_restantes' => $totalClasesGeneradas
         ]);
         
-        // 10. Registrar NUEVO PAGO
+        // 10. Registrar NUEVO PAGO CON TODOS LOS CAMPOS NECESARIOS
         $montoPago = $request->monto_pago ?? 
                     ($inscripcionActual->monto_mensual ?? $inscripcionActual->modalidad->precio_mensual);
         
+        // Calcular subtotal y total si no vienen en la request
+        $subtotal = $request->subtotal ?? $montoPago;
+        $totalFinal = $request->total_final ?? $montoPago;
+        
+        // Asegurar que no sean null
+        $descuentoPorcentaje = $request->descuento_porcentaje ?? 0;
+        $descuentoMonto = $request->descuento_monto ?? 0;
+        
+        // Crear la observación con toda la información
+        $observacion = 'Pago por renovación de inscripción #' . $inscripcionActual->id . 
+                      ' a nueva inscripción #' . $nuevaInscripcion->id . 
+                      '. Período: ' . $fechaInicio->format('d/m/Y') . ' - ' . $fechaFin->format('d/m/Y');
+        
+        // Agregar información de descuento si aplica
+        if ($descuentoPorcentaje > 0 || $descuentoMonto > 0) {
+            $observacion .= '. Descuento: ';
+            
+            if ($descuentoPorcentaje > 0) {
+                $observacion .= $descuentoPorcentaje . '%';
+            }
+            
+            if ($descuentoMonto > 0) {
+                $observacion .= ($descuentoPorcentaje > 0 ? ' ($' : '$') . $descuentoMonto . ')';
+            }
+        }
+        
+        // Agregar motivo si existe
+        if ($request->motivo) {
+            $observacion .= '. Motivo: ' . $request->motivo;
+        }
+        
+        // Crear el pago con TODOS los campos
         $pago = \App\Models\Pago::create([
             'inscripcion_id' => $nuevaInscripcion->id,
             'estudiante_id' => $inscripcionActual->estudiante_id,
+            
+            // MONTO PRINCIPAL
             'monto' => $montoPago,
+            
+            // CAMPOS DE DESCUENTO (COMPLETOS)
+            'descuento_porcentaje' => $descuentoPorcentaje,
+            'descuento_monto' => $descuentoMonto,
+            'subtotal' => $subtotal,
+            'total_final' => $totalFinal,
+            
+            // INFORMACIÓN DEL PAGO
             'metodo_pago' => $request->metodo_pago ?? 'efectivo',
             'fecha_pago' => now(),
             'estado' => 'pagado',
-            'observacion' => 'Pago por renovación de inscripción #' . $inscripcionActual->id . 
-                           ' a nueva inscripción #' . $nuevaInscripcion->id . 
-                           '. Período: ' . $fechaInicio->format('d/m/Y') . ' - ' . $fechaFin->format('d/m/Y'),
+            'observacion' => $observacion,
+            'es_parcial' => 0,
+            'numero_cuota' => 1,
             'created_at' => now(),
             'updated_at' => now()
         ]);
         
-        Log::info("💰 Nuevo pago registrado #{$pago->id} por {$montoPago}");
+        Log::info("💰 Nuevo pago registrado #{$pago->id}", [
+            'monto' => $montoPago,
+            'descuento_porcentaje' => $descuentoPorcentaje,
+            'descuento_monto' => $descuentoMonto,
+            'subtotal' => $subtotal,
+            'total_final' => $totalFinal
+        ]);
         
         // 11. Actualizar inscripción anterior (marcar como renovada)
         $inscripcionActual->update([
@@ -1178,6 +941,12 @@ public function show($id)
                 'clases_generadas' => $totalClasesGeneradas,
                 'monto_pagado' => $montoPago,
                 'metodo_pago' => $pago->metodo_pago,
+                'descuento_aplicado' => [
+                    'porcentaje' => $descuentoPorcentaje,
+                    'monto' => $descuentoMonto
+                ],
+                'subtotal' => $subtotal,
+                'total_final' => $totalFinal,
                 'nuevo_periodo' => $fechaInicio->format('Y-m-d') . ' al ' . $fechaFin->format('Y-m-d')
             ]
         ]);
@@ -1200,13 +969,77 @@ public function show($id)
     }
 }
 
+/**
+ * Función específica para generar clases en renovaciones
+ */
+private function generarClasesParaHorarioRenovacion($inscripcionId, $inscripcionHorarioId, $horario, $estudianteId, $fechaInicio, $fechaFin)
+{
+    Log::info("📅 Generando clases para renovación - Horario: {$horario->nombre} ({$horario->dia_semana})");
+    Log::info("  Período: {$fechaInicio} al {$fechaFin}");
+    
+    // MAPEO CORREGIDO para Carbon
+    $diasMap = [
+        'lunes' => 1, 
+        'martes' => 2, 
+        'miércoles' => 3, 'miercoles' => 3,
+        'jueves' => 4, 
+        'viernes' => 5, 
+        'sábado' => 6, 'sabado' => 6,
+        'domingo' => 7  // Carbon usa 7 para domingo
+    ];
+    
+    $diaHorario = strtolower(trim($horario->dia_semana));
+    $diaNumero = $diasMap[$diaHorario] ?? 1;
+    
+    // Calcular días coincidentes
+    $inicio = Carbon::parse($fechaInicio);
+    $fin = Carbon::parse($fechaFin);
+    
+    $clasesGeneradas = 0;
+    $fechaActual = $inicio->copy();
+    
+    // Incluir fecha final
+    while ($fechaActual <= $fin) {
+        if ($fechaActual->dayOfWeek == $diaNumero) {
+            try {
+                DB::table('clases_programadas')->insert([
+                    'inscripcion_id' => $inscripcionId,
+                    'inscripcion_horario_id' => $inscripcionHorarioId,
+                    'estudiante_id' => $estudianteId,
+                    'horario_id' => $horario->id,
+                    'fecha' => $fechaActual->format('Y-m-d'),
+                    'hora_inicio' => $horario->hora_inicio,
+                    'hora_fin' => $horario->hora_fin,
+                    'estado_clase' => 'programada',
+                    'created_at' => now(),
+                    'updated_at' => now()
+                ]);
+                $clasesGeneradas++;
+                
+                Log::debug("  ✓ Clase generada: {$fechaActual->format('Y-m-d')} {$horario->hora_inicio}");
+            } catch (\Exception $e) {
+                Log::error("  ✗ Error generando clase: " . $e->getMessage());
+            }
+        }
+        $fechaActual->addDay();
+    }
+    
+    Log::info("  Total clases generadas: {$clasesGeneradas}");
+    return $clasesGeneradas;
+}
+
 // Agrega esta función auxiliar para calcular clases por horario
 private function calcularClasesParaHorarioRenovacion($fechaInicio, $fechaFin, $horario)
 {
+    // ¡CORRECCIÓN IMPORTANTE! Carbon usa: 1=Lunes, 2=Martes, 3=Miércoles, 4=Jueves, 5=Viernes, 6=Sábado, 7=Domingo
     $diasSemana = [
-        'lunes' => 1, 'martes' => 2, 'miércoles' => 3,
-        'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'sabado' => 6,
-        'domingo' => 0
+        'lunes' => 1, 
+        'martes' => 2, 
+        'miércoles' => 3, 'miercoles' => 3,
+        'jueves' => 4, 
+        'viernes' => 5, 
+        'sábado' => 6, 'sabado' => 6,
+        'domingo' => 7  // <-- ¡CORREGIDO! 7 en lugar de 0
     ];
     
     $diaHorario = strtolower($horario->dia_semana);
@@ -1215,6 +1048,7 @@ private function calcularClasesParaHorarioRenovacion($fechaInicio, $fechaFin, $h
     $contador = 0;
     $fechaActual = $fechaInicio->copy();
     
+    // ¡IMPORTANTE! Usar <= para INCLUIR la fecha final
     while ($fechaActual <= $fechaFin) {
         if ($fechaActual->dayOfWeek == $diaNumero) {
             $contador++;
@@ -1380,7 +1214,7 @@ public function generarClasesProgramadas($inscripcionId, Request $request)
                 // Convertir día de la semana (ej: "lunes" => 1)
                 $diasSemana = [
                     'lunes' => 1, 'martes' => 2, 'miércoles' => 3,
-                    'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'domingo' => 0
+                    'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'domingo' => 7
                 ];
                 
                 $diaHorario = strtolower($horario->dia_semana);

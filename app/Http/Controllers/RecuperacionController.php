@@ -81,138 +81,100 @@ class RecuperacionController extends Controller
         }
     }
 
-    /**
-     * Store a newly created resource in storage.
-     */
-    public function store(Request $request)
-    {
-        DB::beginTransaction();
-        
-        try {
-            // VALIDACIÓN
-            $validator = Validator::make($request->all(), [
-                'inscripcion_id' => 'required|exists:inscripciones,id',
-                'estudiante_id' => 'required|exists:estudiantes,id',
-                'permiso_justificado_id' => 'required|exists:permisos_justificados,id',
-                'horario_recuperacion_id' => 'required|exists:horarios,id',
-                'fecha_recuperacion' => 'required|date|after_or_equal:today',
-                'motivo' => 'nullable|string|max:500',
-                'administrador_id' => 'required|exists:users,id',
-                'fecha_limite' => 'nullable|date|after_or_equal:fecha_recuperacion'
-            ]);
+/**
+ * Store a newly created resource in storage. - VERSIÓN SIMPLIFICADA
+ */
+public function store(Request $request)
+{
+    DB::beginTransaction();
+    
+    try {
+        // Validación simplificada
+        $validator = Validator::make($request->all(), [
+            'inscripcion_id' => 'required|exists:inscripciones,id',
+            'estudiante_id' => 'required|exists:estudiantes,id',
+            'permiso_justificado_id' => 'required|exists:permisos_justificados,id',
+            'horario_recuperacion_id' => 'required|exists:horarios,id',
+            'fecha_recuperacion' => 'required|date|after_or_equal:today',
+            'motivo' => 'nullable|string|max:500',
+        ]);
 
-            if ($validator->fails()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Errores de validación',
-                    'errors' => $validator->errors()
-                ], 422);
-            }
-
-            // 1. VERIFICAR QUE EL PERMISO EXISTA Y ESTÉ APROBADO
-            $permiso = PermisoJustificado::findOrFail($request->permiso_justificado_id);
-            
-            if ($permiso->estado !== 'aprobado') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'El permiso no está aprobado para recuperación'
-                ], 400);
-            }
-
-            // 2. VERIFICAR QUE NO TENGA YA UNA RECUPERACIÓN PARA ESTE PERMISO
-            $existeRecuperacion = RecuperacionClase::where('permiso_justificado_id', $request->permiso_justificado_id)
-                ->whereIn('estado', ['pendiente', 'programada', 'completada'])
-                ->exists();
-
-            if ($existeRecuperacion) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Este permiso ya tiene una recuperación asignada'
-                ], 400);
-            }
-
-            // 3. VERIFICAR HORARIO DISPONIBLE
-            $horario = Horario::findOrFail($request->horario_recuperacion_id);
-            
-            // Verificar cupo disponible
-            if ($horario->cupo_actual >= $horario->cupo_maximo) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'El horario seleccionado ya está lleno'
-                ], 400);
-            }
-
-            // 4. VERIFICAR QUE EL ESTUDIANTE NO TENGA OTRA CLASE EN EL MISMO HORARIO
-            $conflictoHorario = RecuperacionClase::where('estudiante_id', $request->estudiante_id)
-                ->where('fecha_recuperacion', $request->fecha_recuperacion)
-                ->where('horario_recuperacion_id', $request->horario_recuperacion_id)
-                ->whereIn('estado', ['pendiente', 'programada'])
-                ->exists();
-
-            if ($conflictoHorario) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'El estudiante ya tiene una recuperación programada en este horario'
-                ], 400);
-            }
-
-            // 5. CALCULAR FECHA LÍMITE (15 días por defecto desde la fecha de falta del permiso)
-            $fechaLimite = $request->fecha_limite ?? 
-                Carbon::parse($permiso->fecha_falta)->addDays(15);
-
-            // 6. CREAR LA RECUPERACIÓN
-            $recuperacion = RecuperacionClase::create([
-                'inscripcion_id' => $request->inscripcion_id,
-                'estudiante_id' => $request->estudiante_id,
-                'permiso_justificado_id' => $request->permiso_justificado_id,
-                'asistencia_id' => $permiso->asistencia_id,
-                'horario_recuperacion_id' => $request->horario_recuperacion_id,
-                'fecha_recuperacion' => $request->fecha_recuperacion,
-                'fecha_limite' => $fechaLimite,
-                'motivo' => $request->motivo ?? 'Recuperación de clase justificada',
-                'estado' => 'programada',
-                'en_periodo_valido' => true,
-                'administrador_id' => $request->administrador_id,
-                'creado_por' => $request->administrador_id,
-                'comentarios' => $request->comentarios
-            ]);
-
-            // 7. ACTUALIZAR EL PERMISO PARA INDICAR QUE TIENE RECUPERACIÓN
-            $permiso->update([
-                'tiene_recuperacion' => true,
-                'recuperacion_id' => $recuperacion->id
-            ]);
-
-            // 8. INCREMENTAR CUPO DEL HORARIO
-            $horario->increment('cupo_actual');
-
-            DB::commit();
-
-            // Cargar relaciones para la respuesta
-            $recuperacion->load([
-                'inscripcion',
-                'estudiante',
-                'permisoJustificado',
-                'horario',
-                'administrador'
-            ]);
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Recuperación programada exitosamente',
-                'data' => $recuperacion
-            ], 201);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            
+        if ($validator->fails()) {
             return response()->json([
                 'success' => false,
-                'message' => 'Error al programar la recuperación',
-                'error' => $e->getMessage()
-            ], 500);
+                'message' => 'Errores de validación',
+                'errors' => $validator->errors()
+            ], 422);
         }
+
+        // 1. Verificar que el permiso exista
+        $permiso = PermisoJustificado::find($request->permiso_justificado_id);
+        
+        if (!$permiso) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El permiso no existe'
+            ], 404);
+        }
+
+        // 2. Verificar que no tenga ya una recuperación
+        $existeRecuperacion = RecuperacionClase::where('permiso_justificado_id', $request->permiso_justificado_id)
+            ->whereIn('estado', ['pendiente', 'programada'])
+            ->exists();
+
+        if ($existeRecuperacion) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Este permiso ya tiene una recuperación asignada'
+            ], 400);
+        }
+
+        // 3. Calcular fecha límite (15 días desde la falta)
+        $fechaLimite = Carbon::parse($permiso->fecha_falta)->addDays(15);
+
+        // 4. Crear la recuperación
+        $recuperacion = RecuperacionClase::create([
+            'inscripcion_id' => $request->inscripcion_id,
+            'estudiante_id' => $request->estudiante_id,
+            'permiso_justificado_id' => $request->permiso_justificado_id,
+            'asistencia_id' => $permiso->asistencia_id,
+            'horario_recuperacion_id' => $request->horario_recuperacion_id,
+            'fecha_recuperacion' => $request->fecha_recuperacion,
+            'fecha_limite' => $fechaLimite,
+            'motivo' => $request->motivo ?? 'Recuperación de clase justificada',
+            'estado' => 'programada',
+            'en_periodo_valido' => true,
+            'administrador_id' => auth()->id(),
+            'creado_por' => auth()->id(),
+        ]);
+
+        // 5. Marcar el permiso como que tiene recuperación
+        $permiso->update([
+            'tiene_recuperacion' => true,
+            'recuperacion_id' => $recuperacion->id
+        ]);
+
+        DB::commit();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Recuperación programada exitosamente',
+            'data' => $recuperacion
+        ], 201);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        
+        \Log::error('Error al programar recuperación: ' . $e->getMessage());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al programar la recuperación',
+            'error' => env('APP_DEBUG') ? $e->getMessage() : 'Error interno'
+        ], 500);
     }
+}
+   
 
     /**
      * Display the specified resource.
@@ -388,113 +350,72 @@ class RecuperacionController extends Controller
         }
     }
 
-    /**
-     * MÉTODOS ADICIONALES PARA EL SISTEMA DE RECUPERACIONES
-     */
 
-    /**
-     * Marcar recuperación como completada
-     */
-    public function completar(Request $request, string $id)
-    {
-        DB::beginTransaction();
+public function completar($id, Request $request)
+{
+    DB::beginTransaction();
+    
+    try {
+        // 1. Obtener la recuperación
+        $recuperacion = RecuperacionClase::findOrFail($id);
         
-        try {
-            $recuperacion = RecuperacionClase::findOrFail($id);
-
-            // Validar que esté programada
-            if ($recuperacion->estado !== 'programada') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Solo se pueden completar recuperaciones programadas'
-                ], 400);
-            }
-
-            // Validar que la fecha de recuperación sea hoy o en el pasado
-            if (Carbon::parse($recuperacion->fecha_recuperacion)->gt(Carbon::today())) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No se puede completar una recuperación futura'
-                ], 400);
-            }
-
-            $validator = Validator::make($request->all(), [
-                'asistio' => 'required|boolean',
-                'observaciones' => 'nullable|string|max:500',
-                'hora_registro' => 'nullable|date_format:H:i'
-            ]);
-
-            if ($validator->fails()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Errores de validación',
-                    'errors' => $validator->errors()
-                ], 422);
-            }
-
-            if ($request->asistio) {
-                // 1. Crear registro de asistencia para la recuperación
-                $asistencia = Asistencia::create([
-                    'inscripcion_id' => $recuperacion->inscripcion_id,
-                    'estudiante_id' => $recuperacion->estudiante_id,
-                    'horario_id' => $recuperacion->horario_recuperacion_id,
-                    'fecha' => $recuperacion->fecha_recuperacion,
-                    'hora_registro' => $request->hora_registro ?? now()->format('H:i'),
-                    'estado' => 'asistio',
-                    'es_recuperacion' => true,
-                    'recuperacion_id' => $recuperacion->id,
-                    'observaciones' => $request->observaciones ?? 'Recuperación completada'
-                ]);
-
-                // 2. Marcar recuperación como completada
-                $recuperacion->marcarComoCompletada($asistencia->id);
-
-                // 3. Actualizar clases asistidas en la inscripción
-                $inscripcion = Inscripcion::find($recuperacion->inscripcion_id);
-                if ($inscripcion) {
-                    $inscripcion->increment('clases_asistidas');
-                    
-                    // Si tiene inscripcion_horarios, actualizar también
-                    if ($inscripcion->inscripcion_horarios) {
-                        $inscripcionHorario = $inscripcion->inscripcion_horarios()
-                            ->where('horario_id', $recuperacion->horario_recuperacion_id)
-                            ->first();
-                        
-                        if ($inscripcionHorario) {
-                            $inscripcionHorario->increment('clases_asistidas');
-                            $inscripcionHorario->decrement('clases_restantes');
-                        }
-                    }
-                }
-
-            } else {
-                // Si no asistió, cancelar la recuperación
-                $recuperacion->cancelar('El estudiante no asistió a la recuperación programada');
-            }
-
-            DB::commit();
-
-            $recuperacion->refresh();
-            $recuperacion->load(['asistenciaRecuperacion', 'estudiante', 'horario']);
-
-            return response()->json([
-                'success' => true,
-                'message' => $request->asistio ? 
-                    'Recuperación marcada como completada' : 
-                    'Recuperación cancelada por inasistencia',
-                'data' => $recuperacion
-            ], 200);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            
-            return response()->json([
-                'success' => false,
-                'message' => 'Error al procesar la recuperación',
-                'error' => $e->getMessage()
-            ], 500);
+        // 2. Crear registro en asistencias
+        $asistencia = Asistencia::create([
+            'inscripcion_id' => $recuperacion->inscripcion_id,
+            'horario_id' => $recuperacion->horario_recuperacion_id,
+            'permiso_id' => $recuperacion->permiso_justificado_id,
+            'fecha' => $recuperacion->fecha_recuperacion,
+            'estado' => 'asistio',
+            'observacion' => 'Recuperación completada',
+            'recuperada' => 1,
+            'created_at' => now(),
+            'updated_at' => now()
+        ]);
+        
+        // 3. Actualizar la recuperación - USAR COMENTARIOS NO OBSERVACIONES
+        $recuperacion->estado = 'completada';
+        $recuperacion->asistio_recuperacion = 1;
+        $recuperacion->asistencia_recuperacion_id = $asistencia->id;
+        $recuperacion->fecha_completada = now();
+        // USAR COMENTARIOS en lugar de observaciones
+        if ($request->has('comentarios')) {
+            $recuperacion->comentarios = $request->comentarios;
+        } else {
+            $recuperacion->comentarios = 'Recuperación completada exitosamente';
         }
+        $recuperacion->save();
+        
+        // 4. Actualizar la inscripción
+        $inscripcion = Inscripcion::find($recuperacion->inscripcion_id);
+        if ($inscripcion) {
+            $inscripcion->permisos_usados = max(0, $inscripcion->permisos_usados - 1);
+            $inscripcion->permisos_disponibles = $inscripcion->permisos_disponibles + 1;
+            $inscripcion->save();
+        }
+        
+       
+        
+        DB::commit();
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Recuperación completada exitosamente',
+            'data' => [
+                'recuperacion' => $recuperacion,
+                'asistencia_creada' => $asistencia
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        DB::rollBack();
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al completar la recuperación: ' . $e->getMessage()
+        ], 500);
     }
+}
+
 
     /**
      * Cancelar recuperación
@@ -564,35 +485,96 @@ class RecuperacionController extends Controller
     /**
      * Obtener recuperaciones por inscripción
      */
-     public function porInscripcion($inscripcionId)
-    {
-        try {
-            $recuperaciones = RecuperacionClase::with([
-                'estudiante:id,nombres,apellidos',
-                'permisoJustificado:id,motivo,fecha_falta',
-                'horario:id,dia_semana,hora_inicio,hora_fin,entrenador_id,sucursal_id',
-                'horario.entrenador:id,nombres,apellidos',
-                'horario.sucursal:id,nombre',
-                'administrador:id,nombres'
-            ])
-            ->where('inscripcion_id', $inscripcionId)
-            ->orderBy('fecha_recuperacion', 'desc')
-            ->get();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Recuperaciones obtenidas exitosamente',
-                'data' => $recuperaciones
-            ], 200);
-
-        } catch (\Exception $e) {
+public function porInscripcion($inscripcionId)
+{
+    try {
+        \Log::info('Obteniendo recuperaciones para inscripción: ' . $inscripcionId);
+        
+        // Validar que la inscripción exista
+        $inscripcion = Inscripcion::find($inscripcionId);
+        if (!$inscripcion) {
             return response()->json([
                 'success' => false,
-                'message' => 'Error al obtener recuperaciones',
-                'error' => $e->getMessage()
-            ], 500);
+                'message' => 'La inscripción no existe'
+            ], 404);
         }
+        
+        // Versión SIMPLIFICADA - SOLO DATOS BÁSICOS
+        $recuperaciones = RecuperacionClase::where('inscripcion_id', $inscripcionId)
+            ->where(function($query) {
+                $query->where('estado', 'programada')
+                      ->orWhere('estado', 'pendiente');
+            })
+            ->orderBy('fecha_recuperacion', 'asc')
+            ->get()
+            ->map(function($recuperacion) {
+                // Obtener datos del horario si existe
+                $horarioData = null;
+                if ($recuperacion->horario_recuperacion_id) {
+                    $horario = Horario::find($recuperacion->horario_recuperacion_id);
+                    if ($horario) {
+                        $horarioData = [
+                            'id' => $horario->id,
+                            'dia_semana' => $horario->dia_semana,
+                            'hora_inicio' => $horario->hora_inicio,
+                            'hora_fin' => $horario->hora_fin,
+                            'entrenador_nombre' => 'Entrenador', // Placeholder
+                            'sucursal_nombre' => 'Sucursal', // Placeholder
+                            'modalidad_nombre' => 'Modalidad' // Placeholder
+                        ];
+                    }
+                }
+                
+                // Obtener datos del permiso si existe
+                $permisoData = null;
+                if ($recuperacion->permiso_justificado_id) {
+                    $permiso = PermisoJustificado::find($recuperacion->permiso_justificado_id);
+                    if ($permiso) {
+                        $permisoData = [
+                            'id' => $permiso->id,
+                            'motivo' => $permiso->motivo,
+                            'fecha_falta' => $permiso->fecha_falta
+                        ];
+                    }
+                }
+                
+                return [
+                    'id' => $recuperacion->id,
+                    'estado' => $recuperacion->estado,
+                    'fecha_recuperacion' => $recuperacion->fecha_recuperacion,
+                    'fecha_limite' => $recuperacion->fecha_limite,
+                    'motivo' => $recuperacion->motivo,
+                    'comentarios' => $recuperacion->comentarios,
+                    'horario' => $horarioData,
+                    'permiso_justificado' => $permisoData,
+                    'inscripcion_id' => $recuperacion->inscripcion_id,
+                    'estudiante_id' => $recuperacion->estudiante_id,
+                    'permiso_justificado_id' => $recuperacion->permiso_justificado_id,
+                    'horario_recuperacion_id' => $recuperacion->horario_recuperacion_id
+                ];
+            });
+
+        \Log::info('Recuperaciones encontradas: ' . $recuperaciones->count());
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Recuperaciones obtenidas exitosamente',
+            'data' => $recuperaciones
+        ], 200);
+
+    } catch (\Exception $e) {
+        \Log::error('Error en porInscripcion: ' . $e->getMessage());
+        \Log::error('File: ' . $e->getFile());
+        \Log::error('Line: ' . $e->getLine());
+        \Log::error('Trace: ' . $e->getTraceAsString());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error interno del servidor al obtener recuperaciones',
+            'error' => $e->getMessage()
+        ], 500);
     }
+}
 
     /**
      * Obtener recuperaciones por estudiante

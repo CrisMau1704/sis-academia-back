@@ -10,25 +10,24 @@ class RecuperacionClase extends Model
     protected $table = 'recuperacion_clases';
     
     protected $fillable = [
-        'asistencia_id',
-        'inscripcion_id',
-        'estudiante_id',
-        'permiso_justificado_id',
-        'fecha_recuperacion',
-        'horario_recuperacion_id',
-        'motivo',
-        'motivo_cancelacion',
-        'estado',
-        'en_periodo_valido',
-        'administrador_id',
-        'creado_por',
-        'fecha_limite',
-        'fecha_completada',
-        'comentarios',
-        'asistio_recuperacion',
-        'asistencia_recuperacion_id'
-    ];
-    
+    'inscripcion_id',
+    'estudiante_id',
+    'permiso_justificado_id',
+    'asistencia_id', // ← Si existe esta columna
+    'horario_recuperacion_id',
+    'fecha_recuperacion',
+    'fecha_completada',
+    'fecha_limite',
+    'motivo',
+    'comentarios',
+    'motivo_cancelacion',
+    'estado',
+    'asistio_recuperacion', // ← COLUMNA CORRECTA
+    'asistencia_recuperacion_id', // ← Para guardar el ID de la asistencia
+    'en_periodo_valido',
+    'administrador_id',
+    'creado_por'
+];
     protected $casts = [
         'fecha_recuperacion' => 'date',
         'fecha_limite' => 'date',

@@ -10,24 +10,31 @@ class Pago extends Model
     use HasFactory;
 
     protected $fillable = [
-        'inscripcion_id',
+       'inscripcion_id',
         'monto',
+        'descuento_porcentaje',
+        'descuento_monto',
+        'subtotal',
+        'total_final',
         'metodo_pago',
         'fecha_pago',
         'fecha_vencimiento',
         'estado',
         'observacion',
-       
         'es_parcial',
-        'pago_grupo_id', // Asegúrate de que esté aquí
+        'pago_grupo_id',
         'numero_cuota'
     ];
 
     protected $casts = [
-        'es_parcial' => 'boolean',
-        'pago_grupo_id' => 'integer', // Esto podría causar problemas si el valor es muy grande
-        'numero_cuota' => 'integer',
-        'monto' => 'decimal:2'
+         'descuento_porcentaje' => 'decimal:2',
+        'descuento_monto' => 'decimal:2',
+        'subtotal' => 'decimal:2',
+        'total_final' => 'decimal:2',
+        'monto' => 'decimal:2',
+        'fecha_pago' => 'date',
+        'fecha_vencimiento' => 'date',
+        'es_parcial' => 'boolean'
     ];
 
 
@@ -90,6 +97,33 @@ class Pago extends Model
         ];
 
         return $estados[$this->estado] ?? $this->estado;
+    }
+
+     public function getDescuentoAplicadoAttribute()
+    {
+        if ($this->descuento_monto) {
+            return $this->descuento_monto;
+        }
+        
+        if ($this->descuento_porcentaje) {
+            return ($this->subtotal * $this->descuento_porcentaje) / 100;
+        }
+        
+        return 0;
+    }
+
+      public function getTieneDescuentoAttribute()
+    {
+        return $this->descuento_porcentaje > 0 || $this->descuento_monto > 0;
+    }
+
+    // Scope para buscar pagos con descuento
+    public function scopeConDescuento($query)
+    {
+        return $query->where(function($q) {
+            $q->where('descuento_porcentaje', '>', 0)
+              ->orWhere('descuento_monto', '>', 0);
+        });
     }
 
     public function grupo()
