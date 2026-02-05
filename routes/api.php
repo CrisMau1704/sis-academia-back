@@ -17,6 +17,7 @@ use App\Http\Controllers\PermisoController;
 use App\Http\Controllers\RecuperacionController;
 use App\Http\Controllers\ClaseProgramadaController;
 use App\Http\Controllers\TestController;
+use App\Http\Controllers\ReembolsoController;
 
 /*
 |--------------------------------------------------------------------------
@@ -410,6 +411,8 @@ Route::prefix('recuperaciones')->group(function () {
         Route::get('/{id}', [PagoController::class, 'show']);
         Route::put('/{id}', [PagoController::class, 'update']);
         Route::delete('/{id}', [PagoController::class, 'destroy']);
+         Route::get('/por-estudiante/{estudianteId}', [PagoController::class, 'porEstudiante']);
+
         Route::get('/inscripcion/{inscripcion_id}', [PagoController::class, 'porInscripcion']);
         Route::put('/{id}/anular', [PagoController::class, 'anular']);
         Route::put('/{id}/confirmar', [PagoController::class, 'confirmar']);
@@ -418,7 +421,35 @@ Route::prefix('recuperaciones')->group(function () {
         Route::get('/reporte/mensual', [PagoController::class, 'reporteMensual']);
         Route::get('/estadisticas', [PagoController::class, 'estadisticas']);
         Route::get('/pendientes', [PagoController::class, 'pendientes']);
+       
+        Route::get('pagos/por-estudiante/{estudianteId}', [PagoController::class, 'porEstudiante']); // ← AÑADE ESTA LÍNEA
     });
+
+
+     /*
+    |--------------------------------------------------------------------------
+    | REEEMBOLSOS
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('reembolsos')->group(function () {
+    // CRUD básico
+    Route::get('/', [ReembolsoController::class, 'index']);
+    Route::post('/', [ReembolsoController::class, 'store']);
+    Route::get('/{id}', [ReembolsoController::class, 'show']);
+    Route::put('/{id}', [ReembolsoController::class, 'update']);
+    Route::delete('/{id}', [ReembolsoController::class, 'destroy']);
+    
+    // Acciones específicas
+    Route::post('/{id}/aprobar', [ReembolsoController::class, 'aprobar']);
+    Route::post('/{id}/rechazar', [ReembolsoController::class, 'rechazar']);
+    Route::post('/{id}/procesar', [ReembolsoController::class, 'procesar']);
+    Route::post('/{id}/completar', [ReembolsoController::class, 'completar']);
+    
+    // Reportes
+    Route::get('/estudiante/{estudianteId}', [ReembolsoController::class, 'porEstudiante']);
+    Route::get('/inscripcion/{inscripcionId}', [ReembolsoController::class, 'porInscripcion']);
+    Route::get('/estadisticas/dashboard', [ReembolsoController::class, 'estadisticas']);
+});
 
     /*
     |--------------------------------------------------------------------------

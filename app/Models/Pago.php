@@ -153,4 +153,75 @@ class Pago extends Model
             ->where('estado', 'pendiente')
             ->sum('monto');
     }
+
+    public function reembolsos()
+    {
+        return $this->hasMany(Reembolso::class);
+    }
+    
+    public function reembolsosAprobados()
+    {
+        return $this->reembolsos()->whereIn('estado', ['aprobado', 'procesado', 'completado']);
+    }
+    
+    public function reembolsoPendiente()
+    {
+        return $this->reembolsos()->where('estado', 'pendiente')->first();
+    }
+    
+    // AGREGAR estos métodos
+    public function puedeReembolsar()
+    {
+        // Reglas para determinar si un pago puede ser reembolsado
+        return $this->estado === 'pagado' 
+            && !$this->tiene_reembolso 
+            && $this->created_at->diffInDays(now()) <= 30; // Máximo 30 días
+    }
+    
+    public function montoReembolsable()
+    {
+        return $this->monto - $this->total_reembolsado;
+    }
+    
+    public function porcentajeReembolsado()
+    {
+        if ($this->monto == 0) return 0;
+        return ($this->total_reembolsado / $this->monto) * 100;
+    }
+    public function scopePuedeReembolsar($query)
+    {
+        return $query->where('estado', 'pagado')
+            ->where(function($q) {
+                $q->where('tiene_reembolso', 0)
+                  ->orWhere(function($q2) {
+                      $q2->where('tiene_reembolso', 1)
+                         ->whereColumn('total_reembolsado', '<', 'monto');
+                  });
+            });
+    }
+    
+    /**
+     * Verificar si el pago puede ser reembolsado
+     */
+    public function getPuedeReembolsarAttribute()
+    {
+        // El pago debe estar pagado
+        if ($this->estado !== 'pagado') {
+            return false;
+        }
+        
+        // Calcular monto disponible
+        $montoDisponible = $this->monto - $this->total_reembolsado;
+        
+        // Puede reembolsar si hay monto disponible
+        return $montoDisponible > 0;
+    }
+    
+    /**
+     * Obtener monto disponible para reembolso
+     */
+    public function getMontoDisponibleAttribute()
+    {
+        return $this->monto - $this->total_reembolsado;
+    }
 }

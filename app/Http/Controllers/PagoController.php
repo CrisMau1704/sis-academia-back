@@ -518,4 +518,45 @@ public function porInscripcion($inscripcion_id)
             'message' => 'Pago eliminado exitosamente'
         ]);
     }
+
+   public function porEstudiante($estudianteId)
+{
+    try {
+        // Obtener inscripciones del estudiante
+        $inscripciones = Inscripcion::where('estudiante_id', $estudianteId)
+            ->pluck('id');
+        
+        if ($inscripciones->isEmpty()) {
+            return response()->json([
+                'success' => true,
+                'data' => []
+            ]);
+        }
+        
+        // Consulta CORREGIDA - sin total_reembolsado
+        $pagos = Pago::whereIn('inscripcion_id', $inscripciones)
+            ->where('estado', 'pagado') // Solo pagos pagados
+            ->where(function($query) {
+                // Solo pagos que NO tengan reembolso
+                $query->where('tiene_reembolso', false)
+                      ->orWhereNull('tiene_reembolso');
+            })
+            ->orderBy('fecha_pago', 'desc')
+            ->orderBy('created_at', 'desc')
+            ->get();
+        
+        return response()->json([
+            'success' => true,
+            'data' => $pagos
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al obtener pagos del estudiante: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+
 }
