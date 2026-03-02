@@ -52,6 +52,18 @@ class InscripcionHorario extends Pivot
         return $this->belongsTo(Horario::class);
     }
     
+    // ✅ AGREGAR ESTA RELACIÓN (funciona con Pivot)
+    public function clasesProgramadas()
+    {
+        return $this->hasMany(ClaseProgramada::class, 'inscripcion_horario_id');
+    }
+    
+    // ✅ También agregar alias para compatibilidad
+    public function clases()
+    {
+        return $this->hasMany(ClaseProgramada::class, 'inscripcion_horario_id');
+    }
+    
     // Métodos de negocio
     public function registrarAsistencia(): bool
     {
@@ -83,8 +95,6 @@ class InscripcionHorario extends Pivot
         $this->permisos_usados++;
         return $this->save();
     }
-    
-
     
     public function renovarMes(): bool
     {
@@ -155,12 +165,11 @@ class InscripcionHorario extends Pivot
         return Carbon::now()->diffInDays(Carbon::parse($this->fecha_fin), false);
     }
     
-
-    
     public function getRequiereRenovacionAttribute(): bool
     {
         return $this->esta_vencido || $this->clases_restantes <= 2;
     }
+    
     public function permisosJustificados()
     {
         return $this->hasMany(PermisoJustificado::class, 'inscripcion_id', 'inscripcion_id')
@@ -168,11 +177,9 @@ class InscripcionHorario extends Pivot
                 $query->where('horario_id', $this->horario_id);
             });
     }
-
-    // AGREGAR ESTE MÉTODO PARA RECUPERAR CLASE
+    
     public function recuperarClaseDesdeFalta(): bool
     {
-        // Verificar que haya faltas para recuperar
         $faltasSinRecuperar = Asistencia::where('inscripcion_id', $this->inscripcion_id)
             ->where('horario_id', $this->horario_id)
             ->where('estado', 'falto')
@@ -184,11 +191,10 @@ class InscripcionHorario extends Pivot
         }
         
         $this->clases_restantes++;
-        $this->clases_totales++; // Aumentar el total porque es una clase extra
+        $this->clases_totales++;
         return $this->save();
     }
-
-    // MODIFICAR el método recuperarClase existente:
+    
     public function recuperarClase(): bool
     {
         if ($this->permisos_usados <= 0) {
@@ -199,8 +205,7 @@ class InscripcionHorario extends Pivot
         $this->clases_restantes++;
         return $this->save();
     }
-
-    // AGREGAR este método para justificar falta con permiso
+    
     public function justificarFaltaConPermiso(): bool
     {
         if (!$this->puede_usar_permiso) {
@@ -210,8 +215,7 @@ class InscripcionHorario extends Pivot
         $this->permisos_usados++;
         return $this->save();
     }
-
-    // AGREGAR este método para verificar recuperación en periodo
+    
     public function puedeRecuperarEnPeriodo(): bool
     {
         if (!$this->fecha_fin) {
@@ -222,29 +226,24 @@ class InscripcionHorario extends Pivot
         $hoy = Carbon::now();
         $diasDesdeVencimiento = $hoy->diffInDays($fechaFin, false);
         
-        // Solo primera semana después del vencimiento (0 a 7 días)
         return $diasDesdeVencimiento >= 0 && $diasDesdeVencimiento <= 7;
     }
-
-    // AGREGAR este accesor para permisos disponibles
+    
     public function getPermisosDisponiblesAttribute(): int
     {
         return max(0, 3 - $this->permisos_usados);
     }
-
-    // AGREGAR este accesor para clases tomadas (mejor cálculo)
+    
     public function getClasesTomadasAttribute(): int
     {
         return $this->clases_asistidas;
     }
-
-    // AGREGAR este accesor para ver si requiere notificación
+    
     public function getRequiereNotificacionAttribute(): bool
     {
         return $this->clases_restantes <= 2 && $this->estado === 'activo';
     }
-
-    // AGREGAR este método para registrar asistencia con validación
+    
     public function registrarAsistenciaConValidacion(): array
     {
         if ($this->estado !== 'activo') {

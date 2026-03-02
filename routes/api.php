@@ -18,31 +18,66 @@ use App\Http\Controllers\RecuperacionController;
 use App\Http\Controllers\ClaseProgramadaController;
 use App\Http\Controllers\TestController;
 use App\Http\Controllers\ReembolsoController;
+use App\Http\Controllers\PreinscripcionController;
+
+use App\Http\Controllers\Public\PublicModalidadController;
+use App\Http\Controllers\Public\PublicHorarioController;
+use App\Http\Controllers\Public\PublicSucursalController; 
 
 /*
 |--------------------------------------------------------------------------
-| AUTH
+| RUTAS PÚBLICAS (NO REQUIEREN AUTENTICACIÓN)
 |--------------------------------------------------------------------------
 */
+
+// Endpoint de estado del servidor
+Route::get('/estado-servidor', function () {
+    return response()->json([
+        'status' => 'online',
+        'timestamp' => now()->toDateTimeString(),
+        'version' => '1.0.0'
+    ]);
+});
+
+// Auth público
 Route::prefix('v1/auth')->group(function () {
     Route::post('login', [AuthController::class, 'login']);
     Route::post('register', [AuthController::class, 'register']);
+});
 
-    Route::middleware('auth:sanctum')->group(function () {
-        Route::get('profile', [AuthController::class, 'profile']);
-        Route::post('logout', [AuthController::class, 'logout']);
-    });
+// 🟢 RUTAS PÚBLICAS PARA LANDING PAGE
+Route::prefix('public')->group(function () {
+    // Modalidades públicas
+    Route::get('/modalidades', [PublicModalidadController::class, 'index']);
+    Route::get('/modalidades/{id}', [PublicModalidadController::class, 'show']);
+    
+    // Horarios públicos
+    Route::get('/horarios', [PublicHorarioController::class, 'index']);
+    Route::get('/horarios/modalidad/{modalidadId}', [PublicHorarioController::class, 'porModalidad']);
+    
+    // 👇 NUEVA RUTA DE SUCURSALES
+    Route::get('/sucursales', [PublicSucursalController::class, 'index']);
+    Route::get('/sucursales/{id}', [PublicSucursalController::class, 'show']);
+    
+    // Preinscripción (también pública)
+    Route::post('/preinscripciones', [PreinscripcionController::class, 'store']);
 });
 
 /*
 |--------------------------------------------------------------------------
-| RUTAS PROTEGIDAS
+| RUTAS PROTEGIDAS (REQUIEREN AUTENTICACIÓN)
 |--------------------------------------------------------------------------
 */
 Route::middleware('auth:sanctum')->group(function () {
 
-// routes/api.php (dentro del grupo 'auth:sanctum' si quieres protegerlo)
-Route::post('/test-email', [TestController::class, 'sendTestEmail']);
+    // Auth privado
+    Route::prefix('v1/auth')->group(function () {
+        Route::get('profile', [AuthController::class, 'profile']);
+        Route::post('logout', [AuthController::class, 'logout']);
+    });
+
+    // Test email
+    Route::post('/test-email', [TestController::class, 'sendTestEmail']);
 
     /*
     |--------------------------------------------------------------------------
@@ -129,6 +164,15 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
         Route::get('/horarios/por-modalidad/{modalidadId}', [HorarioController::class, 'getPorModalidad']);
     });
 
+    Route::prefix('preinscripciones')->group(function () {
+        Route::get('/', [PreinscripcionController::class, 'index']);           // Listar
+        Route::get('/estadisticas', [PreinscripcionController::class, 'estadisticas']); // Estadísticas
+        Route::get('/{id}', [PreinscripcionController::class, 'show']);        // Ver una
+        Route::put('/{id}', [PreinscripcionController::class, 'update']);      // Actualizar
+        Route::post('/{id}/approve', [PreinscripcionController::class, 'approve']); // Aprobar
+        Route::post('/{id}/reject', [PreinscripcionController::class, 'reject']);    // Rechazar
+    });
+
     /*
     |--------------------------------------------------------------------------
     | INSCRIPCIONES
@@ -136,6 +180,9 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
     */
     Route::prefix('inscripciones')->group(function () {
         Route::get('/', [InscripcionController::class, 'index']);
+        Route::get('/preinscripciones', [InscripcionController::class, 'preinscripciones']);
+        // 👇 RUTA PARA APROBAR PREINSCRIPCIÓN
+        Route::post('/{id}/aprobar', [InscripcionController::class, 'aprobarPreinscripcion']);
         Route::get('/todas', [InscripcionController::class, 'obtenerTodos']);
         Route::post('/', [InscripcionController::class, 'store']);
         Route::get('/{id}', [InscripcionController::class, 'show']);
@@ -152,69 +199,16 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
         Route::get('/{id}/control-clases', [InscripcionController::class, 'controlClases']);
         Route::put('/{id}/actualizar-clases', [InscripcionController::class, 'actualizarContadorClases']);
         Route::get('/estudiante/{estudianteId}/activa', [InscripcionController::class, 'inscripcionActiva']);
-
         Route::get('/inscripciones/{id}/estado-financiero', [InscripcionController::class, 'estadoFinanciero']);
         
-        // ========== RUTAS CLAVE PARA ACTUALIZAR ASISTENCIAS ==========
-        
-        // 1. Incrementar asistencia en inscripción (RUTA MÁS IMPORTANTE)
+        // Rutas clave para actualizar asistencias
         Route::post('/{id}/incrementar-asistencia', [InscripcionController::class, 'incrementarAsistencia']);
-
         Route::get('/{id}/horarios', [InscripcionController::class, 'getHorarios']);
-       Route::put('/{inscripcionId}/horarios/{horarioId}', [InscripcionController::class, 'actualizarHorarioEspecifico']);
-        
-        // 2. Obtener estadísticas de inscripción
+        Route::put('/{inscripcionId}/horarios/{horarioId}', [InscripcionController::class, 'actualizarHorarioEspecifico']);
         Route::get('/{id}/estadisticas', [InscripcionController::class, 'estadisticasInscripcion']);
-        
-        // 3. Completar inscripción cuando terminen las clases
         Route::post('/{id}/completar', [InscripcionController::class, 'completarInscripcion']);
-        
-        // 4. Verificar clases restantes para notificaciones
         Route::get('/{id}/clases-restantes', [InscripcionController::class, 'clasesRestantes']);
-        
-        // 5. Registrar asistencia (alias)
-        
-    });
-
-    /*
-    |--------------------------------------------------------------------------
-    | CLASES PROGRAMADAS - NUEVO SISTEMA (CORREGIDO - SIN DUPLICADOS)
-    |--------------------------------------------------------------------------
-    */
-    Route::prefix('clases-programadas')->group(function () {
-        // CRUD básico
-        Route::get('/', [ClaseProgramadaController::class, 'index']);
-        Route::post('/', [ClaseProgramadaController::class, 'store']);
-        Route::get('/{clase}', [ClaseProgramadaController::class, 'show']);
-        Route::put('/{clase}', [ClaseProgramadaController::class, 'update']);
-        Route::delete('/{clase}', [ClaseProgramadaController::class, 'destroy']);
-        
-        // Calendario y visualización
-        Route::get('/calendario/mes', [ClaseProgramadaController::class, 'calendario']);
-        
-        // Generación automática
-        Route::post('/generar/automatico', [ClaseProgramadaController::class, 'generar']);
-        
-        // Gestión de estado
-        Route::post('/{clase}/estado', [ClaseProgramadaController::class, 'cambiarEstado']);
-        
-        // ========== RUTAS PARA MARCAR ASISTENCIA ==========
-        Route::post('/{clase}/marcar-asistencia', [ClaseProgramadaController::class, 'marcarAsistencia']);
-        Route::get('/buscar', [ClaseProgramadaController::class, 'buscarClase']);
-        
-        // Recuperaciones
-        Route::post('/recuperacion/nueva', [ClaseProgramadaController::class, 'crearRecuperacion']);
-        Route::get('/estudiante/{estudianteId}/pendientes-recuperacion', 
-            [ClaseProgramadaController::class, 'clasesParaRecuperacion']);
-        
-        // Reportes
-        Route::get('/reporte/asistencias', [ClaseProgramadaController::class, 'reporteAsistencias']);
-        
-        // Filtros específicos
-        Route::get('/fecha/{fecha}', [ClaseProgramadaController::class, 'porFecha']);
-        
-        // Para dashboard rápido
-        Route::get('/estadisticas/hoy', [ClaseProgramadaController::class, 'estadisticasHoy']);
+      
     });
 
     // Ruta para generar clases al crear inscripción
@@ -222,7 +216,6 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
         try {
             $inscripcion = \App\Models\Inscripcion::with(['horarios', 'estudiante'])->findOrFail($id);
             
-            // Verificar si ya tiene clases generadas
             $clasesExistentes = \App\Models\ClaseProgramada::where('inscripcion_id', $id)->count();
             
             if ($clasesExistentes > 0) {
@@ -236,7 +229,6 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
             
             $totalGeneradas = 0;
             
-            // Generar clases manualmente
             $fechaInicio = \Carbon\Carbon::parse($inscripcion->fecha_inicio);
             $fechaFin = \Carbon\Carbon::parse($inscripcion->fecha_fin);
             
@@ -253,7 +245,6 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
                 $fechaActual = $fechaInicio->copy();
                 while ($fechaActual <= $fechaFin) {
                     if ($fechaActual->dayOfWeek == $diaNumero) {
-                        // Verificar si ya existe esta clase para evitar duplicados
                         $existe = \App\Models\ClaseProgramada::where('inscripcion_id', $inscripcion->id)
                             ->where('horario_id', $horario->id)
                             ->whereDate('fecha', $fechaActual)
@@ -302,103 +293,89 @@ Route::post('/test-email', [TestController::class, 'sendTestEmail']);
 
     /*
     |--------------------------------------------------------------------------
-    | ASISTENCIAS - SISTEMA COMPLETO
+    | CLASES PROGRAMADAS
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('clases-programadas')->group(function () {
+        Route::get('/', [ClaseProgramadaController::class, 'index']);
+        Route::post('/', [ClaseProgramadaController::class, 'store']);
+        Route::get('/{clase}', [ClaseProgramadaController::class, 'show']);
+        Route::put('/{clase}', [ClaseProgramadaController::class, 'update']);
+        Route::delete('/{clase}', [ClaseProgramadaController::class, 'destroy']);
+        Route::get('/calendario/mes', [ClaseProgramadaController::class, 'calendario']);
+        Route::post('/generar/automatico', [ClaseProgramadaController::class, 'generar']);
+        Route::post('/{clase}/estado', [ClaseProgramadaController::class, 'cambiarEstado']);
+        Route::post('/{clase}/marcar-asistencia', [ClaseProgramadaController::class, 'marcarAsistencia']);
+        Route::get('/buscar', [ClaseProgramadaController::class, 'buscarClase']);
+        Route::post('/recuperacion/nueva', [ClaseProgramadaController::class, 'crearRecuperacion']);
+        Route::get('/estudiante/{estudianteId}/pendientes-recuperacion', 
+            [ClaseProgramadaController::class, 'clasesParaRecuperacion']);
+        Route::get('/reporte/asistencias', [ClaseProgramadaController::class, 'reporteAsistencias']);
+        Route::get('/fecha/{fecha}', [ClaseProgramadaController::class, 'porFecha']);
+        Route::get('/estadisticas/hoy', [ClaseProgramadaController::class, 'estadisticasHoy']);
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | ASISTENCIAS
     |--------------------------------------------------------------------------
     */
     Route::prefix('asistencias')->group(function () {
-
-    Route::get('/', [AsistenciaController::class, 'index']);
-    // Ruta principal para marcar asistencia
-    Route::post('/marcar', [AsistenciaController::class, 'marcar']);
-
-    // Alias si quieres compatibilidad
-    Route::post('/registrar', [AsistenciaController::class, 'marcar']);
-
-    // Otras rutas de asistencias
-    Route::post('/justificar', [AsistenciaController::class, 'justificar']);
-    Route::post('/lote', [AsistenciaController::class, 'marcarLote']);
-    Route::get('/estadisticas', [AsistenciaController::class, 'estadisticas']);
-    Route::get('/exportar', [AsistenciaController::class, 'exportar']);
-    Route::get('/permisos/{inscripcionId}', [AsistenciaController::class, 'verificarPermisos']);
-    Route::get('/motivos', [AsistenciaController::class, 'motivosJustificacion']);
-    Route::get('/dia', [AsistenciaController::class, 'obtenerDia']);
-});
-
-
-    /*
-|--------------------------------------------------------------------------
-| PERMISOS JUSTIFICADOS (ESPECÍFICOS PARA RECUPERACIONES)
-|--------------------------------------------------------------------------
-*/
-Route::prefix('permisos-justificados')->group(function () {
-    // Obtener permisos justificados por inscripción
-    Route::get('/por-inscripcion', [PermisoController::class, 'justificadosPorInscripcion']);
-    
-    // Obtener permisos recuperables (aprobados y sin recuperación)
-    Route::get('/recuperables', [PermisoController::class, 'permisosRecuperables']);
-    
-    // Verificar si un permiso tiene recuperación
-    Route::get('/{id}/tiene-recuperacion', [PermisoController::class, 'tieneRecuperacion']);
-    
-    // Crear permiso justificado
-    Route::post('/', [PermisoController::class, 'crearJustificacion']);
-    
-    // Obtener permiso justificado específico
-    Route::get('/{id}', [PermisoController::class, 'mostrarJustificado']);
-    
-    // Actualizar permiso justificado
-    Route::put('/{id}', [PermisoController::class, 'actualizarJustificado']);
-    
-    // Eliminar permiso justificado
-    Route::delete('/{id}', [PermisoController::class, 'eliminarJustificado']);
-Route::get('/justificados/por-inscripcion', [PermisoController::class, 'justificadosPorInscripcion']);
-    Route::get('/justificados/recuperables', [PermisoController::class, 'permisosRecuperables']);
-    Route::get('/justificados/{id}/tiene-recuperacion', [PermisoController::class, 'tieneRecuperacion']);
-    Route::post('/justificados', [PermisoController::class, 'crearJustificacion']);
-    
-    // Estadísticas
-    Route::get('/estadisticas', [PermisoController::class, 'estadisticas']);
-    Route::get('/proximos-a-vencer', [PermisoController::class, 'proximosAVencer']);
-    
-    // Para asistencias
-    Route::post('/justificar-ausencia', [PermisoController::class, 'justificarAusencia']);
-    Route::get('/por-estudiante-fecha', [PermisoController::class, 'porEstudianteYFecha']);
-    
-});
+        Route::get('/', [AsistenciaController::class, 'index']);
+        Route::post('/marcar', [AsistenciaController::class, 'marcar']);
+        Route::post('/registrar', [AsistenciaController::class, 'marcar']);
+        Route::post('/justificar', [AsistenciaController::class, 'justificar']);
+        Route::post('/lote', [AsistenciaController::class, 'marcarLote']);
+        Route::get('/estadisticas', [AsistenciaController::class, 'estadisticas']);
+        Route::get('/exportar', [AsistenciaController::class, 'exportar']);
+        Route::get('/permisos/{inscripcionId}', [AsistenciaController::class, 'verificarPermisos']);
+        Route::get('/motivos', [AsistenciaController::class, 'motivosJustificacion']);
+        Route::get('/dia', [AsistenciaController::class, 'obtenerDia']);
+    });
 
     /*
     |--------------------------------------------------------------------------
-    | RECUPERACIONES DE CLASES
+    | PERMISOS JUSTIFICADOS
     |--------------------------------------------------------------------------
     */
-    // routes/api.php
+    Route::prefix('permisos-justificados')->group(function () {
+        Route::get('/por-inscripcion', [PermisoController::class, 'justificadosPorInscripcion']);
+        Route::get('/recuperables', [PermisoController::class, 'permisosRecuperables']);
+        Route::get('/{id}/tiene-recuperacion', [PermisoController::class, 'tieneRecuperacion']);
+        Route::post('/', [PermisoController::class, 'crearJustificacion']);
+        Route::get('/{id}', [PermisoController::class, 'mostrarJustificado']);
+        Route::put('/{id}', [PermisoController::class, 'actualizarJustificado']);
+        Route::delete('/{id}', [PermisoController::class, 'eliminarJustificado']);
+        Route::get('/justificados/por-inscripcion', [PermisoController::class, 'justificadosPorInscripcion']);
+        Route::get('/justificados/recuperables', [PermisoController::class, 'permisosRecuperables']);
+        Route::get('/justificados/{id}/tiene-recuperacion', [PermisoController::class, 'tieneRecuperacion']);
+        Route::post('/justificados', [PermisoController::class, 'crearJustificacion']);
+        Route::get('/estadisticas', [PermisoController::class, 'estadisticas']);
+        Route::get('/proximos-a-vencer', [PermisoController::class, 'proximosAVencer']);
+        Route::post('/justificar-ausencia', [PermisoController::class, 'justificarAusencia']);
+        Route::get('/por-estudiante-fecha', [PermisoController::class, 'porEstudianteYFecha']);
+    });
 
-Route::prefix('recuperaciones')->group(function () {
-    // CRUD básico
-    Route::get('/', [RecuperacionController::class, 'index']);
-    Route::post('/', [RecuperacionController::class, 'store']);
-    Route::get('/{id}', [RecuperacionController::class, 'show']);
-    Route::put('/{id}', [RecuperacionController::class, 'update']);
-    Route::delete('/{id}', [RecuperacionController::class, 'destroy']);
-    
-    // Estados
-    Route::post('/{id}/completar', [RecuperacionController::class, 'completar']);
-    Route::post('/{id}/cancelar', [RecuperacionController::class, 'cancelar']);
-    
-    // Consultas específicas
-    Route::get('/inscripcion/{inscripcionId}', [RecuperacionController::class, 'porInscripcion']);
-    Route::get('/estudiante/{estudianteId}', [RecuperacionController::class, 'porEstudiante']);
-    Route::get('/{inscripcionId}/permisos-recuperables', [RecuperacionController::class, 'permisosRecuperables']);
-    
-    // Horarios disponibles
-    Route::get('/horarios/disponibles', [RecuperacionController::class, 'horariosDisponibles']);
-    
-    // Verificación
-    Route::get('/{inscripcionId}/verificar-periodo', [RecuperacionController::class, 'verificarPeriodo']);
-    
-    // Reportes
-    Route::get('/reporte/mensual', [RecuperacionController::class, 'reporteMensual']);
-});
+    /*
+    |--------------------------------------------------------------------------
+    | RECUPERACIONES
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('recuperaciones')->group(function () {
+        Route::get('/', [RecuperacionController::class, 'index']);
+        Route::post('/', [RecuperacionController::class, 'store']);
+        Route::get('/{id}', [RecuperacionController::class, 'show']);
+        Route::put('/{id}', [RecuperacionController::class, 'update']);
+        Route::delete('/{id}', [RecuperacionController::class, 'destroy']);
+        Route::post('/{id}/completar', [RecuperacionController::class, 'completar']);
+        Route::post('/{id}/cancelar', [RecuperacionController::class, 'cancelar']);
+        Route::get('/inscripcion/{inscripcionId}', [RecuperacionController::class, 'porInscripcion']);
+        Route::get('/estudiante/{estudianteId}', [RecuperacionController::class, 'porEstudiante']);
+        Route::get('/{inscripcionId}/permisos-recuperables', [RecuperacionController::class, 'permisosRecuperables']);
+        Route::get('/horarios/disponibles', [RecuperacionController::class, 'horariosDisponibles']);
+        Route::get('/{inscripcionId}/verificar-periodo', [RecuperacionController::class, 'verificarPeriodo']);
+        Route::get('/reporte/mensual', [RecuperacionController::class, 'reporteMensual']);
+    });
 
     /*
     |--------------------------------------------------------------------------
@@ -411,45 +388,35 @@ Route::prefix('recuperaciones')->group(function () {
         Route::get('/{id}', [PagoController::class, 'show']);
         Route::put('/{id}', [PagoController::class, 'update']);
         Route::delete('/{id}', [PagoController::class, 'destroy']);
-         Route::get('/por-estudiante/{estudianteId}', [PagoController::class, 'porEstudiante']);
-
+        Route::get('/por-estudiante/{estudianteId}', [PagoController::class, 'porEstudiante']);
         Route::get('/inscripcion/{inscripcion_id}', [PagoController::class, 'porInscripcion']);
         Route::put('/{id}/anular', [PagoController::class, 'anular']);
         Route::put('/{id}/confirmar', [PagoController::class, 'confirmar']);
-        
-        // Nuevas rutas
         Route::get('/reporte/mensual', [PagoController::class, 'reporteMensual']);
         Route::get('/estadisticas', [PagoController::class, 'estadisticas']);
         Route::get('/pendientes', [PagoController::class, 'pendientes']);
-       
-        Route::get('pagos/por-estudiante/{estudianteId}', [PagoController::class, 'porEstudiante']); // ← AÑADE ESTA LÍNEA
+        Route::get('pagos/por-estudiante/{estudianteId}', [PagoController::class, 'porEstudiante']);
     });
 
-
-     /*
+    /*
     |--------------------------------------------------------------------------
-    | REEEMBOLSOS
+    | REEMBOLSOS
     |--------------------------------------------------------------------------
     */
     Route::prefix('reembolsos')->group(function () {
-    // CRUD básico
-    Route::get('/', [ReembolsoController::class, 'index']);
-    Route::post('/', [ReembolsoController::class, 'store']);
-    Route::get('/{id}', [ReembolsoController::class, 'show']);
-    Route::put('/{id}', [ReembolsoController::class, 'update']);
-    Route::delete('/{id}', [ReembolsoController::class, 'destroy']);
-    
-    // Acciones específicas
-    Route::post('/{id}/aprobar', [ReembolsoController::class, 'aprobar']);
-    Route::post('/{id}/rechazar', [ReembolsoController::class, 'rechazar']);
-    Route::post('/{id}/procesar', [ReembolsoController::class, 'procesar']);
-    Route::post('/{id}/completar', [ReembolsoController::class, 'completar']);
-    
-    // Reportes
-    Route::get('/estudiante/{estudianteId}', [ReembolsoController::class, 'porEstudiante']);
-    Route::get('/inscripcion/{inscripcionId}', [ReembolsoController::class, 'porInscripcion']);
-    Route::get('/estadisticas/dashboard', [ReembolsoController::class, 'estadisticas']);
-});
+        Route::get('/', [ReembolsoController::class, 'index']);
+        Route::post('/', [ReembolsoController::class, 'store']);
+        Route::get('/{id}', [ReembolsoController::class, 'show']);
+        Route::put('/{id}', [ReembolsoController::class, 'update']);
+        Route::delete('/{id}', [ReembolsoController::class, 'destroy']);
+        Route::post('/{id}/aprobar', [ReembolsoController::class, 'aprobar']);
+        Route::post('/{id}/rechazar', [ReembolsoController::class, 'rechazar']);
+        Route::post('/{id}/procesar', [ReembolsoController::class, 'procesar']);
+        Route::post('/{id}/completar', [ReembolsoController::class, 'completar']);
+        Route::get('/estudiante/{estudianteId}', [ReembolsoController::class, 'porEstudiante']);
+        Route::get('/inscripcion/{inscripcionId}', [ReembolsoController::class, 'porInscripcion']);
+        Route::get('/estadisticas/dashboard', [ReembolsoController::class, 'estadisticas']);
+    });
 
     /*
     |--------------------------------------------------------------------------
@@ -457,7 +424,6 @@ Route::prefix('recuperaciones')->group(function () {
     |--------------------------------------------------------------------------
     */
     Route::prefix('notificaciones')->group(function () {
-        // Enviar notificación por clases bajas
         Route::post('/clases-bajas', function (\Illuminate\Http\Request $request) {
             try {
                 $data = $request->validate([
@@ -472,10 +438,8 @@ Route::prefix('recuperaciones')->group(function () {
                     'sucursal' => 'nullable|string'
                 ]);
                 
-                // Aquí implementarías el envío de correo
                 \Log::info('Notificación de clases bajas enviada', $data);
                 
-                // Guardar en la base de datos
                 \App\Models\Notificacion::create([
                     'estudiante_id' => $data['estudiante_id'],
                     'inscripcion_id' => $data['inscripcion_id'],
@@ -501,7 +465,6 @@ Route::prefix('recuperaciones')->group(function () {
             }
         });
         
-        // Obtener notificaciones del día
         Route::get('/hoy', function () {
             $hoy = now()->toDateString();
             $notificaciones = \App\Models\Notificacion::whereDate('fecha', $hoy)
@@ -549,66 +512,33 @@ Route::prefix('recuperaciones')->group(function () {
     });
 
     /*
-|--------------------------------------------------------------------------
-| PERMISOS DEL SISTEMA
-|--------------------------------------------------------------------------
-*/
-Route::prefix('permisos-sistema')->group(function () {
-    // Obtener permisos del menú para el usuario actual
-    Route::get('/menu', [UserRoleController::class, 'getMenuPermissions']);
-    
-    // Obtener todos los permisos disponibles
-    Route::get('/', [UserRoleController::class, 'getAllPermissions']);
-    
-    // Obtener permisos por rol
-    Route::get('/rol/{id}', [UserRoleController::class, 'getPermissionsByRole']);
-    
-    // Actualizar permisos de un rol
-    Route::put('/rol/{id}', [UserRoleController::class, 'updateRolePermissions']);
-});
+    |--------------------------------------------------------------------------
+    | PERMISOS DEL SISTEMA
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('permisos-sistema')->group(function () {
+        Route::get('/menu', [UserRoleController::class, 'getMenuPermissions']);
+        Route::get('/', [UserRoleController::class, 'getAllPermissions']);
+        Route::get('/rol/{id}', [UserRoleController::class, 'getPermissionsByRole']);
+        Route::put('/rol/{id}', [UserRoleController::class, 'updateRolePermissions']);
+    });
 
-/*
-|--------------------------------------------------------------------------
-| ROLES CON PERMISOS
-|--------------------------------------------------------------------------
-*/
-Route::prefix('roles')->group(function () {
-    // Obtener usuarios con roles
-    Route::get('/usuarios', [UserRoleController::class, 'index']);
-    
-    // Obtener todos los roles
-    Route::get('/', [UserRoleController::class, 'getRoles']);
-    
-    // Asignar roles a un usuario
-    Route::post('/asignar', [UserRoleController::class, 'assignRoles']);
-    
-    // Obtener permisos por rol
-    Route::get('/{id}/permisos', [UserRoleController::class, 'getPermissionsByRole']);
-    
-    // Obtener roles con sus permisos
-    Route::get('/con-permisos', [UserRoleController::class, 'getRolesWithPermissions']);
-    
-    // Actualizar permisos de un rol
-    Route::put('/{id}/permisos', [UserRoleController::class, 'updateRolePermissions']);
-    
-    // CRUD de roles
-    Route::post('/', [UserRoleController::class, 'store']);
-    Route::put('/{id}', [UserRoleController::class, 'update']);
-    Route::delete('/{id}', [UserRoleController::class, 'destroy']);
-});
-});
-
-/*
-|--------------------------------------------------------------------------
-| RUTAS PÚBLICAS (si las necesitas)
-|--------------------------------------------------------------------------
-*/
-Route::get('/estado-servidor', function () {
-    return response()->json([
-        'status' => 'online',
-        'timestamp' => now()->toDateTimeString(),
-        'version' => '1.0.0'
-    ]);
+    /*
+    |--------------------------------------------------------------------------
+    | ROLES CON PERMISOS
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('roles')->group(function () {
+        Route::get('/usuarios', [UserRoleController::class, 'index']);
+        Route::get('/', [UserRoleController::class, 'getRoles']);
+        Route::post('/asignar', [UserRoleController::class, 'assignRoles']);
+        Route::get('/{id}/permisos', [UserRoleController::class, 'getPermissionsByRole']);
+        Route::get('/con-permisos', [UserRoleController::class, 'getRolesWithPermissions']);
+        Route::put('/{id}/permisos', [UserRoleController::class, 'updateRolePermissions']);
+        Route::post('/', [UserRoleController::class, 'store']);
+        Route::put('/{id}', [UserRoleController::class, 'update']);
+        Route::delete('/{id}', [UserRoleController::class, 'destroy']);
+    });
 });
 
 /*

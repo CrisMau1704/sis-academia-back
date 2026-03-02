@@ -1536,4 +1536,307 @@ public function actualizarHorarioEspecifico($inscripcionId, $horarioId, Request 
         ], 500);
     }
 }
+// app/Http/Controllers/InscripcionController.php
+
+/**
+ * Obtener solo preinscripciones (estado = preinscripcion)
+ */
+public function preinscripciones(Request $request)
+{
+    try {
+        $query = Inscripcion::with([
+            'estudiante', 
+            'modalidad', 
+            'sucursal'
+        ])->where('estado', 'preinscripcion') // 👈 FILTRO CLAVE
+        ->latest(); // Ordenar por fecha descendente
+        
+        // Filtro por búsqueda (nombre o CI)
+        if ($request->has('buscar') && $request->buscar) {
+            $search = $request->buscar;
+            $query->whereHas('estudiante', function($q) use ($search) {
+                $q->where('nombres', 'LIKE', "%{$search}%")
+                  ->orWhere('apellidos', 'LIKE', "%{$search}%")
+                  ->orWhere('ci', 'LIKE', "%{$search}%");
+            });
+        }
+        
+        // Filtro por modalidad
+        if ($request->has('modalidad_id') && $request->modalidad_id) {
+            $query->where('modalidad_id', $request->modalidad_id);
+        }
+        
+        // Filtro por sucursal
+        if ($request->has('sucursal_id') && $request->sucursal_id) {
+            $query->where('sucursal_id', $request->sucursal_id);
+        }
+        
+        // Filtro por fechas
+        if ($request->has('fecha_desde') && $request->fecha_desde) {
+            $query->whereDate('created_at', '>=', $request->fecha_desde);
+        }
+        
+        if ($request->has('fecha_hasta') && $request->fecha_hasta) {
+            $query->whereDate('created_at', '<=', $request->fecha_hasta);
+        }
+        
+        // Paginación
+        $perPage = $request->get('per_page', 15);
+        $preinscripciones = $query->paginate($perPage);
+        
+        return response()->json([
+            'success' => true,
+            'data' => $preinscripciones,
+            'message' => 'Preinscripciones obtenidas correctamente'
+        ]);
+        
+    } catch (\Exception $e) {
+        Log::error('Error al obtener preinscripciones: ' . $e->getMessage());
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al cargar preinscripciones',
+            'error' => $e->getMessage()
+        ], 500);
+    }
+}
+
+
+
+public function aprobarPreinscripcion($id, Request $request)
+{
+    DB::beginTransaction();
+    
+    try {
+        // 1. Buscar la preinscripción con sus relaciones
+        $inscripcion = Inscripcion::with([
+            'estudiante', 
+            'modalidad',
+            'inscripcionHorarios' => function($q) {
+                $q->where('estado', 'reservado'); // Solo horarios reservados
+            }
+        ])->where('estado', 'preinscripcion')->findOrFail($id);
+        
+        // 2. Validar datos
+        $request->validate([
+            'metodo_pago' => 'required|in:efectivo,qr,tarjeta,transferencia',
+            'monto_pagado' => 'required|numeric|min:0',
+            'fecha_inicio' => 'required|date',
+            'fecha_fin' => 'required|date|after:fecha_inicio',
+            'entrenador_id' => 'required|exists:users,id',
+            'observacion_pago' => 'nullable|string',
+            'horarios_confirmados' => 'sometimes|array',
+            'horarios_confirmados.*' => 'exists:horarios,id'
+        ]);
+
+        // 3. OBTENER HORARIOS DESDE LA TABLA PIVOT
+        $horariosReservados = $inscripcion->inscripcionHorarios->pluck('horario_id')->toArray();
+        
+        // 4. Determinar horarios a confirmar
+        $horariosAConfirmar = $request->horarios_confirmados ?? $horariosReservados;
+        
+        if (empty($horariosAConfirmar)) {
+            throw new \Exception('No hay horarios reservados para confirmar');
+        }
+
+        \Log::info('✅ Horarios a confirmar:', $horariosAConfirmar);
+
+        // 5. ACTUALIZAR INSCRIPCIÓN PRINCIPAL
+        $clasesMensuales = $inscripcion->modalidad->clases_mensuales ?? 12;
+        $precioMensual = $inscripcion->modalidad->precio_mensual ?? 0;
+        $permisosMaximos = $inscripcion->modalidad->permisos_maximos ?? 3;
+        
+        $inscripcion->update([
+            'estado' => 'activo',
+            'fecha_inicio' => $request->fecha_inicio,
+            'fecha_fin' => $request->fecha_fin,
+            'entrenador_id' => $request->entrenador_id,
+            'clases_totales' => $clasesMensuales,
+            'permisos_disponibles' => $permisosMaximos,
+            'monto_mensual' => $precioMensual
+        ]);
+
+        // 6. CREAR PAGO
+        $pago = \App\Models\Pago::create([
+            'inscripcion_id' => $inscripcion->id,
+            'estudiante_id' => $inscripcion->estudiante_id,
+            'monto' => $request->monto_pagado,
+            'metodo_pago' => $request->metodo_pago,
+            'fecha_pago' => now(),
+            'estado' => 'pagado',
+            'observacion' => $request->observacion_pago ?? 'Pago de inscripción',
+            'referencia' => 'CONF-' . $inscripcion->id . '-' . time()
+        ]);
+
+        $totalClasesActualizadas = 0;
+        $horariosProcesados = [];
+
+        // 7. PROCESAR CADA INSCRIPCION_HORARIO
+        foreach ($inscripcion->inscripcionHorarios as $inscripcionHorario) {
+            // Verificar si este horario está en la lista de confirmados
+            if (in_array($inscripcionHorario->horario_id, $horariosAConfirmar)) {
+                // Calcular distribución de clases
+                $totalHorarios = count($horariosAConfirmar);
+                $clasesPorHorario = floor($clasesMensuales / $totalHorarios);
+                $horariosConExtra = $clasesMensuales % $totalHorarios;
+                
+                $indiceHorario = array_search($inscripcionHorario->horario_id, $horariosAConfirmar);
+                $clasesParaEsteHorario = $clasesPorHorario + ($indiceHorario < $horariosConExtra ? 1 : 0);
+                
+                // Actualizar a ACTIVO
+                $inscripcionHorario->update([
+                    'estado' => 'activo',
+                    'fecha_inicio' => $request->fecha_inicio,
+                    'fecha_fin' => $request->fecha_fin,
+                    'clases_totales' => $clasesParaEsteHorario,
+                    'clases_restantes' => $clasesParaEsteHorario
+                ]);
+                
+                $horariosProcesados[] = [
+                    'id' => $inscripcionHorario->id,
+                    'horario_id' => $inscripcionHorario->horario_id,
+                    'clases' => $clasesParaEsteHorario
+                ];
+                
+                // 8. ACTUALIZAR CLASES PROGRAMADAS
+                $clasesProgramadas = \App\Models\ClaseProgramada::where('inscripcion_horario_id', $inscripcionHorario->id)
+                    ->where('estado_clase', 'reservada')
+                    ->get();
+                
+                $clasesEnPeriodo = 0;
+                
+                foreach ($clasesProgramadas as $clase) {
+                    $fechaClase = \Carbon\Carbon::parse($clase->fecha);
+                    
+                    if ($fechaClase->between($request->fecha_inicio, $request->fecha_fin)) {
+                        $clase->update([
+                            'estado_clase' => 'programada',
+                            'observaciones' => 'Clase programada'
+                        ]);
+                        $clasesEnPeriodo++;
+                        $totalClasesActualizadas++;
+                    } else {
+                        $clase->update([
+                            'estado_clase' => 'cancelada',
+                            'observaciones' => 'Fuera de período'
+                        ]);
+                    }
+                }
+                
+                // 9. GENERAR CLASES FALTANTES
+                if ($clasesEnPeriodo < $clasesParaEsteHorario) {
+                    $clasesFaltantes = $clasesParaEsteHorario - $clasesEnPeriodo;
+                    $this->generarClasesFaltantes(
+                        $inscripcion->id,
+                        $inscripcionHorario->id,
+                        $inscripcionHorario->horario_id,
+                        $inscripcion->estudiante_id,
+                        $request->fecha_inicio,
+                        $request->fecha_fin,
+                        $clasesFaltantes
+                    );
+                    $totalClasesActualizadas += $clasesFaltantes;
+                }
+                
+            } else {
+                // Cancelar horarios no confirmados
+                $inscripcionHorario->update(['estado' => 'cancelado']);
+                
+                \App\Models\ClaseProgramada::where('inscripcion_horario_id', $inscripcionHorario->id)
+                    ->where('estado_clase', 'reservada')
+                    ->update([
+                        'estado_clase' => 'cancelada',
+                        'observaciones' => 'Horario no confirmado'
+                    ]);
+            }
+        }
+
+        // 10. Actualizar estudiante
+        $inscripcion->estudiante->update(['estado' => 'activo']);
+
+        DB::commit();
+
+        return response()->json([
+            'success' => true,
+            'message' => '✅ Inscripción confirmada exitosamente',
+            'data' => [
+                'inscripcion_id' => $inscripcion->id,
+                'estudiante' => $inscripcion->estudiante->nombres . ' ' . $inscripcion->estudiante->apellidos,
+                'horarios_activos' => count($horariosAConfirmar),
+                'clases_programadas' => $totalClasesActualizadas,
+                'pago' => $pago->monto,
+                'detalle' => $horariosProcesados
+            ]
+        ]);
+
+    } catch (\Exception $e) {
+        DB::rollBack();
+        \Log::error('❌ Error:', [
+            'message' => $e->getMessage(),
+            'trace' => $e->getTraceAsString(),
+            'line' => $e->getLine()
+        ]);
+        
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al confirmar: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+/**
+ * Generar clases faltantes
+ */
+private function generarClasesFaltantes($inscripcionId, $inscripcionHorarioId, $horarioId, $estudianteId, $fechaInicio, $fechaFin, $cantidad)
+{
+    $horario = \App\Models\Horario::find($horarioId);
+    if (!$horario) return 0;
+    
+    $diasMap = [
+        'lunes' => 1, 'martes' => 2, 'miércoles' => 3, 'miercoles' => 3,
+        'jueves' => 4, 'viernes' => 5, 'sábado' => 6, 'sabado' => 6, 'domingo' => 0
+    ];
+    
+    $diaHorario = $diasMap[strtolower($horario->dia_semana)] ?? -1;
+    if ($diaHorario === -1) return 0;
+    
+    $fechaActual = \Carbon\Carbon::parse($fechaInicio);
+    $fechaFinDate = \Carbon\Carbon::parse($fechaFin);
+    $clasesGeneradas = 0;
+    
+    while ($fechaActual <= $fechaFinDate && $clasesGeneradas < $cantidad) {
+        if ($fechaActual->dayOfWeek == $diaHorario) {
+            // Verificar que no exista ya
+            $existe = \App\Models\ClaseProgramada::where('inscripcion_horario_id', $inscripcionHorarioId)
+                ->where('fecha', $fechaActual->format('Y-m-d'))
+                ->exists();
+            
+            if (!$existe) {
+                \App\Models\ClaseProgramada::create([
+                    'inscripcion_horario_id' => $inscripcionHorarioId,
+                    'horario_id' => $horarioId,
+                    'inscripcion_id' => $inscripcionId,
+                    'estudiante_id' => $estudianteId,
+                    'fecha' => $fechaActual->format('Y-m-d'),
+                    'hora_inicio' => $horario->hora_inicio,
+                    'hora_fin' => $horario->hora_fin,
+                    'estado_clase' => 'programada',
+                    'es_recuperacion' => false,
+                    'cuenta_para_asistencia' => true
+                ]);
+                $clasesGeneradas++;
+            }
+        }
+        $fechaActual->addDay();
+    }
+    
+    return $clasesGeneradas;
+}
+
+
+
+
+
+
+
 }
